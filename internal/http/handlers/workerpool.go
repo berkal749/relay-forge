@@ -29,6 +29,7 @@ type workerPoolRequest struct {
 	RetryBackoff          string   `json:"retry_backoff"`
 	RetryBaseDelaySeconds int32    `json:"retry_base_delay_seconds"`
 	RetryMaxDelaySeconds  int32    `json:"retry_max_delay_seconds"`
+	AllowedCIDRs          []string `json:"allowed_cidrs"`
 }
 
 type workerPoolUpdateRequest struct {
@@ -41,6 +42,7 @@ type workerPoolUpdateRequest struct {
 	RetryBackoff          *string   `json:"retry_backoff"`
 	RetryBaseDelaySeconds *int32    `json:"retry_base_delay_seconds"`
 	RetryMaxDelaySeconds  *int32    `json:"retry_max_delay_seconds"`
+	AllowedCIDRs          *[]string `json:"allowed_cidrs"`
 }
 
 type enrollmentTokenRequest struct {
@@ -60,6 +62,7 @@ type workerPoolResponse struct {
 	RetryBackoff          string    `json:"retry_backoff"`
 	RetryBaseDelaySeconds int32     `json:"retry_base_delay_seconds"`
 	RetryMaxDelaySeconds  int32     `json:"retry_max_delay_seconds"`
+	AllowedCIDRs          []string  `json:"allowed_cidrs"`
 	CreatedAt             time.Time `json:"created_at"`
 	UpdatedAt             time.Time `json:"updated_at"`
 }
@@ -101,6 +104,7 @@ func (h *WorkerPoolHandler) Create(w http.ResponseWriter, r *http.Request) {
 		RetryBackoff:          request.RetryBackoff,
 		RetryBaseDelaySeconds: request.RetryBaseDelaySeconds,
 		RetryMaxDelaySeconds:  request.RetryMaxDelaySeconds,
+		AllowedCIDRs:          request.AllowedCIDRs,
 	})
 	if err != nil {
 		writeWorkerPoolError(w, "create worker pool", err)
@@ -171,6 +175,7 @@ func (h *WorkerPoolHandler) Update(w http.ResponseWriter, r *http.Request) {
 		RetryBackoff:          request.RetryBackoff,
 		RetryBaseDelaySeconds: request.RetryBaseDelaySeconds,
 		RetryMaxDelaySeconds:  request.RetryMaxDelaySeconds,
+		AllowedCIDRs:          request.AllowedCIDRs,
 	})
 	if err != nil {
 		writeWorkerPoolError(w, "update worker pool", err)
@@ -252,10 +257,144 @@ func (h *WorkerPoolHandler) CreateEnrollmentToken(w http.ResponseWriter, r *http
 	})
 }
 
+type workerPoolStatResponse struct {
+	PoolID             uuid.UUID `json:"pool_id"`
+	OnlineWorkers      int32     `json:"online_workers"`
+	OfflineWorkers     int32     `json:"offline_workers"`
+	RunningJobs        int32     `json:"running_jobs"`
+	QueueDepth         int32     `json:"queue_depth"`
+	JobsPerMinute      float64   `json:"jobs_per_minute"`
+	SuccessRate        float64   `json:"success_rate"`
+	AvgDurationSeconds float64   `json:"avg_duration_seconds"`
+}
+
+type workerResponse struct {
+	ID              uuid.UUID  `json:"id"`
+	ProjectID       uuid.UUID  `json:"project_id"`
+	WorkerPoolID    *uuid.UUID `json:"worker_pool_id"`
+	Name            string     `json:"name"`
+	Status          string     `json:"status"`
+	Mode            string     `json:"mode"`
+	LastHeartbeatAt *time.Time `json:"last_heartbeat_at"`
+	CreatedAt       time.Time  `json:"created_at"`
+	RunningJobs     int32      `json:"running_jobs"`
+}
+
+func (h *WorkerPoolHandler) Stats(w http.ResponseWriter, r *http.Request) {
+	session, ok := middleware.SessionFromContext(r.Context())
+	if !ok {
+		httpx.WriteError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	projectID, err := uuid.Parse(r.PathValue("projectID"))
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid project id")
+		return
+	}
+	stats, err := h.service.Stats(r.Context(), session.User.ID, projectID)
+	if err != nil {
+		writeWorkerPoolError(w, "worker pool stats", err)
+		return
+	}
+	response := make([]workerPoolStatResponse, 0, len(stats))
+	for _, item := range stats {
+		completed := item.SucceededLastHour + item.FailedLastHour
+		rate := 0.0
+		if completed > 0 {
+			rate = float64(item.SucceededLastHour) / float64(completed) * 100
+		}
+		response = append(response, workerPoolStatResponse{
+			PoolID:             item.PoolID,
+			OnlineWorkers:      item.OnlineWorkers,
+			OfflineWorkers:     item.OfflineWorkers,
+			RunningJobs:        item.RunningJobs,
+			QueueDepth:         item.QueueDepth,
+			JobsPerMinute:      float64(completed) / 60,
+			SuccessRate:        rate,
+			AvgDurationSeconds: item.AvgDurationSeconds,
+		})
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"stats": response})
+}
+
+func (h *WorkerPoolHandler) Workers(w http.ResponseWriter, r *http.Request) {
+	session, ok := middleware.SessionFromContext(r.Context())
+	if !ok {
+		httpx.WriteError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	projectID, err := uuid.Parse(r.PathValue("projectID"))
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid project id")
+		return
+	}
+	var poolID *uuid.UUID
+	if value := r.URL.Query().Get("pool_id"); value != "" {
+		parsed, err := uuid.Parse(value)
+		if err != nil {
+			httpx.WriteError(w, http.StatusBadRequest, "invalid pool id")
+			return
+		}
+		poolID = &parsed
+	}
+	workers, err := h.service.Workers(r.Context(), session.User.ID, projectID, poolID)
+	if err != nil {
+		writeWorkerPoolError(w, "list workers", err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"workers": toWorkerResponses(workers)})
+}
+
+func (h *WorkerPoolHandler) PoolWorkers(w http.ResponseWriter, r *http.Request) {
+	session, ok := middleware.SessionFromContext(r.Context())
+	if !ok {
+		httpx.WriteError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	projectID, err := uuid.Parse(r.PathValue("projectID"))
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid project id")
+		return
+	}
+	poolID, err := uuid.Parse(r.PathValue("poolID"))
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid pool id")
+		return
+	}
+	workers, err := h.service.Workers(r.Context(), session.User.ID, projectID, &poolID)
+	if err != nil {
+		writeWorkerPoolError(w, "list pool workers", err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"workers": toWorkerResponses(workers)})
+}
+
+func toWorkerResponses(workers []db.ListWorkersWithLoadRow) []workerResponse {
+	response := make([]workerResponse, 0, len(workers))
+	for _, item := range workers {
+		response = append(response, workerResponse{
+			ID:              item.ID,
+			ProjectID:       item.ProjectID,
+			WorkerPoolID:    item.WorkerPoolID,
+			Name:            item.Name,
+			Status:          item.Status,
+			Mode:            item.Mode,
+			LastHeartbeatAt: item.LastHeartbeatAt,
+			CreatedAt:       item.CreatedAt,
+			RunningJobs:     item.RunningJobs,
+		})
+	}
+	return response
+}
+
 func toWorkerPoolResponse(pool db.WorkerPool) workerPoolResponse {
 	queueNames := pool.QueueNames
 	if queueNames == nil {
 		queueNames = []string{}
+	}
+	allowedCIDRs := pool.AllowedCidrs
+	if allowedCIDRs == nil {
+		allowedCIDRs = []string{}
 	}
 
 	return workerPoolResponse{
@@ -270,6 +409,7 @@ func toWorkerPoolResponse(pool db.WorkerPool) workerPoolResponse {
 		RetryBackoff:          pool.RetryBackoff,
 		RetryBaseDelaySeconds: pool.RetryBaseDelaySeconds,
 		RetryMaxDelaySeconds:  pool.RetryMaxDelaySeconds,
+		AllowedCIDRs:          allowedCIDRs,
 		CreatedAt:             pool.CreatedAt,
 		UpdatedAt:             pool.UpdatedAt,
 	}
@@ -295,6 +435,8 @@ func writeWorkerPoolError(w http.ResponseWriter, operation string, err error) {
 		httpx.WriteError(w, http.StatusBadRequest, "worker pool retry backoff must be fixed or exponential")
 	case errors.Is(err, workerpool.ErrInvalidRetryDelay):
 		httpx.WriteError(w, http.StatusBadRequest, "worker pool retry delays must be between 0 and 86400 seconds, with max >= base")
+	case errors.Is(err, workerpool.ErrInvalidAllowedCIDRs):
+		httpx.WriteError(w, http.StatusBadRequest, "worker pool allowed CIDRs must be valid IPv4/IPv6 CIDRs and contain at most 50 entries")
 	case errors.Is(err, workerpool.ErrInvalidStatus):
 		httpx.WriteError(w, http.StatusBadRequest, "worker pool status must be active or paused")
 	case errors.Is(err, workerpool.ErrEmptyUpdate):

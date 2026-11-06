@@ -27,6 +27,9 @@ type Config struct {
 	RateLimitAPIPerMinute       int
 	RateLimitJobSubmitPerMinute int
 
+	DatabaseURLExplicit bool
+
+	WorkerMode              string
 	WorkerProjectID         string
 	WorkerToken             string
 	WorkerTokenFile         string
@@ -42,6 +45,18 @@ type Config struct {
 	WorkerCleanupInterval   time.Duration
 	RetryBaseDelay          time.Duration
 	RetryMaxDelay           time.Duration
+	WorkerLeaseGrace        time.Duration
+	WorkerEgressAllowlist   []string
+	WorkerSecretsFile       string
+
+	TokenRotationGrace     time.Duration
+	APIOutboxInterval      time.Duration
+	APICleanupInterval     time.Duration
+	APIReaperInterval      time.Duration
+	APIWorkerSweepInterval time.Duration
+	WorkerStaleAfter       time.Duration
+	TrustProxyHeaders      bool
+	WorkerMTLSHeader       string
 
 	SupervisorPollInterval time.Duration
 	SupervisorWorkerBinary string
@@ -50,6 +65,7 @@ type Config struct {
 
 func Load() (Config, error) {
 	databaseURL := os.Getenv("DATABASE_URL")
+	databaseURLExplicit := databaseURL != ""
 	if databaseURL == "" {
 		databaseURL = defaultDatabaseURL
 	}
@@ -146,6 +162,22 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("RETRY_MAX_DELAY must be greater than or equal to RETRY_BASE_DELAY")
 	}
 
+	workerMode := strings.ToLower(strings.TrimSpace(os.Getenv("WORKER_MODE")))
+	if workerMode == "" {
+		if databaseURLExplicit {
+			workerMode = "direct"
+		} else {
+			workerMode = "remote"
+		}
+	}
+	if workerMode != "direct" && workerMode != "remote" {
+		return Config{}, fmt.Errorf("WORKER_MODE must be direct or remote")
+	}
+
+	workerLeaseGrace, err := envDuration("WORKER_LEASE_GRACE", 60*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
 	workerTokenFile := os.Getenv("WORKER_TOKEN_FILE")
 	if workerTokenFile == "" {
 		workerTokenFile = ".relayforge/worker-token.json"
@@ -165,6 +197,39 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("WORKER_ENROLLMENT_TTL must be between 1m and 24h")
 	}
 
+	tokenRotationGrace, err := envDuration("TOKEN_ROTATION_GRACE", 24*time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
+	apiOutboxInterval, err := envDuration("API_OUTBOX_INTERVAL", time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	apiCleanupInterval, err := envDuration("API_CLEANUP_INTERVAL", time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
+	apiReaperInterval, err := envDuration("API_REAPER_INTERVAL", 15*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	apiWorkerSweepInterval, err := envDuration("API_WORKER_SWEEP_INTERVAL", 30*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	workerStaleAfter, err := envDuration("WORKER_STALE_AFTER", 90*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	trustProxyHeaders := false
+	if value := strings.TrimSpace(os.Getenv("TRUST_PROXY_HEADERS")); value != "" {
+		trustProxyHeaders, err = strconv.ParseBool(value)
+		if err != nil {
+			return Config{}, fmt.Errorf("parse TRUST_PROXY_HEADERS: %w", err)
+		}
+	}
+	workerEgressAllowlist := splitList(os.Getenv("WORKER_EGRESS_ALLOWLIST"))
+
 	supervisorPollInterval, err := envDuration("SUPERVISOR_POLL_INTERVAL", 5*time.Second)
 	if err != nil {
 		return Config{}, err
@@ -181,6 +246,7 @@ func Load() (Config, error) {
 	return Config{
 		AppEnv:                      appEnv,
 		DatabaseURL:                 databaseURL,
+		DatabaseURLExplicit:         databaseURLExplicit,
 		DatabaseConnectTimeout:      10 * time.Second,
 		HTTPAddr:                    httpAddr,
 		SessionTTL:                  sessionTTL,
@@ -190,6 +256,7 @@ func Load() (Config, error) {
 		RateLimitAPIPerMinute:       rateLimitAPIPerMinute,
 		RateLimitJobSubmitPerMinute: rateLimitJobSubmitPerMinute,
 
+		WorkerMode:              workerMode,
 		WorkerProjectID:         os.Getenv("WORKER_PROJECT_ID"),
 		WorkerToken:             os.Getenv("WORKER_TOKEN"),
 		WorkerTokenFile:         workerTokenFile,
@@ -205,6 +272,18 @@ func Load() (Config, error) {
 		WorkerCleanupInterval:   workerCleanupInterval,
 		RetryBaseDelay:          retryBaseDelay,
 		RetryMaxDelay:           retryMaxDelay,
+		WorkerLeaseGrace:        workerLeaseGrace,
+		WorkerEgressAllowlist:   workerEgressAllowlist,
+		WorkerSecretsFile:       os.Getenv("WORKER_SECRETS_FILE"),
+
+		TokenRotationGrace:     tokenRotationGrace,
+		APIOutboxInterval:      apiOutboxInterval,
+		APICleanupInterval:     apiCleanupInterval,
+		APIReaperInterval:      apiReaperInterval,
+		APIWorkerSweepInterval: apiWorkerSweepInterval,
+		WorkerStaleAfter:       workerStaleAfter,
+		TrustProxyHeaders:      trustProxyHeaders,
+		WorkerMTLSHeader:       os.Getenv("WORKER_MTLS_HEADER"),
 
 		SupervisorPollInterval: supervisorPollInterval,
 		SupervisorWorkerBinary: supervisorWorkerBinary,
@@ -248,6 +327,18 @@ func envNonNegativeInt(name string, fallback int) (int, error) {
 		return 0, fmt.Errorf("%s must not be negative", name)
 	}
 	return parsed, nil
+}
+
+func splitList(value string) []string {
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			result = append(result, part)
+		}
+	}
+	return result
 }
 
 func defaultWorkerName() string {

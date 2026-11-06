@@ -37,6 +37,7 @@ type CredentialOptions struct {
 	TokenFile       string
 	EnrollmentToken string
 	APIBaseURL      string
+	WorkerName      string
 	HTTPClient      *http.Client
 }
 

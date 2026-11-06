@@ -12,9 +12,9 @@ import (
 )
 
 const createWorker = `-- name: CreateWorker :one
-INSERT INTO workers (project_id, worker_token_id, worker_pool_id, name, status)
-VALUES ($1, $2, $3, $4, $5)
-RETURNING id, project_id, name, status, last_heartbeat_at, created_at, worker_token_id, worker_pool_id
+INSERT INTO workers (project_id, worker_token_id, worker_pool_id, name, status, mode)
+VALUES ($1, $2, $3, $4, $5, $6)
+RETURNING id, project_id, name, status, last_heartbeat_at, created_at, worker_token_id, worker_pool_id, mode
 `
 
 type CreateWorkerParams struct {
@@ -23,6 +23,7 @@ type CreateWorkerParams struct {
 	WorkerPoolID  *uuid.UUID `json:"worker_pool_id"`
 	Name          string     `json:"name"`
 	Status        string     `json:"status"`
+	Mode          string     `json:"mode"`
 }
 
 func (q *Queries) CreateWorker(ctx context.Context, arg CreateWorkerParams) (Worker, error) {
@@ -32,6 +33,7 @@ func (q *Queries) CreateWorker(ctx context.Context, arg CreateWorkerParams) (Wor
 		arg.WorkerPoolID,
 		arg.Name,
 		arg.Status,
+		arg.Mode,
 	)
 	var i Worker
 	err := row.Scan(
@@ -43,12 +45,13 @@ func (q *Queries) CreateWorker(ctx context.Context, arg CreateWorkerParams) (Wor
 		&i.CreatedAt,
 		&i.WorkerTokenID,
 		&i.WorkerPoolID,
+		&i.Mode,
 	)
 	return i, err
 }
 
 const getWorker = `-- name: GetWorker :one
-SELECT id, project_id, name, status, last_heartbeat_at, created_at, worker_token_id, worker_pool_id FROM workers WHERE id = $1
+SELECT id, project_id, name, status, last_heartbeat_at, created_at, worker_token_id, worker_pool_id, mode FROM workers WHERE id = $1
 `
 
 func (q *Queries) GetWorker(ctx context.Context, id uuid.UUID) (Worker, error) {
@@ -63,12 +66,39 @@ func (q *Queries) GetWorker(ctx context.Context, id uuid.UUID) (Worker, error) {
 		&i.CreatedAt,
 		&i.WorkerTokenID,
 		&i.WorkerPoolID,
+		&i.Mode,
+	)
+	return i, err
+}
+
+const getWorkerForProject = `-- name: GetWorkerForProject :one
+SELECT id, project_id, name, status, last_heartbeat_at, created_at, worker_token_id, worker_pool_id, mode FROM workers WHERE id = $1 AND project_id = $2
+`
+
+type GetWorkerForProjectParams struct {
+	ID        uuid.UUID `json:"id"`
+	ProjectID uuid.UUID `json:"project_id"`
+}
+
+func (q *Queries) GetWorkerForProject(ctx context.Context, arg GetWorkerForProjectParams) (Worker, error) {
+	row := q.db.QueryRow(ctx, getWorkerForProject, arg.ID, arg.ProjectID)
+	var i Worker
+	err := row.Scan(
+		&i.ID,
+		&i.ProjectID,
+		&i.Name,
+		&i.Status,
+		&i.LastHeartbeatAt,
+		&i.CreatedAt,
+		&i.WorkerTokenID,
+		&i.WorkerPoolID,
+		&i.Mode,
 	)
 	return i, err
 }
 
 const listWorkersByProject = `-- name: ListWorkersByProject :many
-SELECT id, project_id, name, status, last_heartbeat_at, created_at, worker_token_id, worker_pool_id FROM workers
+SELECT id, project_id, name, status, last_heartbeat_at, created_at, worker_token_id, worker_pool_id, mode FROM workers
 WHERE project_id = $1
 ORDER BY created_at DESC
 `
@@ -91,6 +121,7 @@ func (q *Queries) ListWorkersByProject(ctx context.Context, projectID uuid.UUID)
 			&i.CreatedAt,
 			&i.WorkerTokenID,
 			&i.WorkerPoolID,
+			&i.Mode,
 		); err != nil {
 			return nil, err
 		}
@@ -100,6 +131,35 @@ func (q *Queries) ListWorkersByProject(ctx context.Context, projectID uuid.UUID)
 		return nil, err
 	}
 	return items, nil
+}
+
+const markStaleWorkersOffline = `-- name: MarkStaleWorkersOffline :execrows
+UPDATE workers
+SET status = 'offline'
+WHERE status = 'online'
+  AND (
+      last_heartbeat_at IS NULL
+      OR last_heartbeat_at < now() - make_interval(secs => $1::int)
+  )
+`
+
+func (q *Queries) MarkStaleWorkersOffline(ctx context.Context, staleSeconds int32) (int64, error) {
+	result, err := q.db.Exec(ctx, markStaleWorkersOffline, staleSeconds)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const markTokenWorkersOffline = `-- name: MarkTokenWorkersOffline :exec
+UPDATE workers
+SET status = 'offline'
+WHERE worker_token_id = $1 AND status = 'online'
+`
+
+func (q *Queries) MarkTokenWorkersOffline(ctx context.Context, workerTokenID *uuid.UUID) error {
+	_, err := q.db.Exec(ctx, markTokenWorkersOffline, workerTokenID)
+	return err
 }
 
 const markWorkerOffline = `-- name: MarkWorkerOffline :exec
@@ -117,7 +177,7 @@ const updateWorkerHeartbeat = `-- name: UpdateWorkerHeartbeat :one
 UPDATE workers
 SET status = 'online', last_heartbeat_at = now()
 WHERE id = $1
-RETURNING id, project_id, name, status, last_heartbeat_at, created_at, worker_token_id, worker_pool_id
+RETURNING id, project_id, name, status, last_heartbeat_at, created_at, worker_token_id, worker_pool_id, mode
 `
 
 func (q *Queries) UpdateWorkerHeartbeat(ctx context.Context, id uuid.UUID) (Worker, error) {
@@ -132,6 +192,7 @@ func (q *Queries) UpdateWorkerHeartbeat(ctx context.Context, id uuid.UUID) (Work
 		&i.CreatedAt,
 		&i.WorkerTokenID,
 		&i.WorkerPoolID,
+		&i.Mode,
 	)
 	return i, err
 }

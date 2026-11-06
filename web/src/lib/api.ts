@@ -107,6 +107,8 @@ export type WorkerToken = {
   revoked_at: string | null
   expires_at: string | null
   last_used_at: string | null
+  rotated_at: string | null
+  replaced_by_id: string | null
   created_at: string
 }
 
@@ -122,8 +124,32 @@ export type WorkerPool = {
   retry_backoff: "fixed" | "exponential"
   retry_base_delay_seconds: number
   retry_max_delay_seconds: number
+  allowed_cidrs: string[]
   created_at: string
   updated_at: string
+}
+
+export type WorkerPoolStat = {
+  pool_id: string
+  online_workers: number
+  offline_workers: number
+  running_jobs: number
+  queue_depth: number
+  jobs_per_minute: number
+  success_rate: number
+  avg_duration_seconds: number
+}
+
+export type WorkerSummary = {
+  id: string
+  project_id: string
+  worker_pool_id: string | null
+  name: string
+  status: "online" | "offline"
+  mode: "direct" | "remote"
+  last_heartbeat_at: string | null
+  created_at: string
+  running_jobs: number
 }
 
 export type WorkerPoolInput = {
@@ -136,6 +162,7 @@ export type WorkerPoolInput = {
   retry_backoff?: "fixed" | "exponential"
   retry_base_delay_seconds?: number
   retry_max_delay_seconds?: number
+  allowed_cidrs?: string[]
 }
 
 export type JobStatus =
@@ -325,6 +352,28 @@ export const api = {
     return request<{ worker_pool: WorkerPool }>(
       `/v1/projects/${projectId}/worker-pools/${poolId}`,
       { method: "PATCH", token, body: input },
+    )
+  },
+
+  workerPoolStats(token: string, projectId: string) {
+    return request<{ stats: WorkerPoolStat[] }>(
+      `/v1/projects/${projectId}/worker-pools/stats`,
+      { token },
+    )
+  },
+
+  listWorkers(token: string, projectId: string, poolId?: string) {
+    const query = poolId ? `?pool_id=${poolId}` : ""
+    return request<{ workers: WorkerSummary[] }>(
+      `/v1/projects/${projectId}/workers${query}`,
+      { token },
+    )
+  },
+
+  rotateWorkerToken(token: string, projectId: string, tokenId: string) {
+    return request<{ worker_token: WorkerToken; token: string; grace_seconds: number }>(
+      `/v1/projects/${projectId}/worker-tokens/${tokenId}/rotate`,
+      { method: "POST", token },
     )
   },
 

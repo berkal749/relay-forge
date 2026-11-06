@@ -7,21 +7,23 @@ package db
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
 
 const createExecution = `-- name: CreateExecution :one
-INSERT INTO executions (job_id, worker_id, attempt_number, status)
-VALUES ($1, $2, $3, $4)
-RETURNING id, job_id, worker_id, attempt_number, status, started_at, finished_at, error_message, result
+INSERT INTO executions (job_id, worker_id, attempt_number, status, lease_expires_at)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, job_id, worker_id, attempt_number, status, started_at, finished_at, error_message, result, lease_expires_at
 `
 
 type CreateExecutionParams struct {
-	JobID         uuid.UUID  `json:"job_id"`
-	WorkerID      *uuid.UUID `json:"worker_id"`
-	AttemptNumber int32      `json:"attempt_number"`
-	Status        string     `json:"status"`
+	JobID          uuid.UUID  `json:"job_id"`
+	WorkerID       *uuid.UUID `json:"worker_id"`
+	AttemptNumber  int32      `json:"attempt_number"`
+	Status         string     `json:"status"`
+	LeaseExpiresAt *time.Time `json:"lease_expires_at"`
 }
 
 func (q *Queries) CreateExecution(ctx context.Context, arg CreateExecutionParams) (Execution, error) {
@@ -30,6 +32,7 @@ func (q *Queries) CreateExecution(ctx context.Context, arg CreateExecutionParams
 		arg.WorkerID,
 		arg.AttemptNumber,
 		arg.Status,
+		arg.LeaseExpiresAt,
 	)
 	var i Execution
 	err := row.Scan(
@@ -42,6 +45,7 @@ func (q *Queries) CreateExecution(ctx context.Context, arg CreateExecutionParams
 		&i.FinishedAt,
 		&i.ErrorMessage,
 		&i.Result,
+		&i.LeaseExpiresAt,
 	)
 	return i, err
 }
@@ -53,8 +57,8 @@ SET
     finished_at = now(),
     error_message = $3,
     result = $4
-WHERE id = $1
-RETURNING id, job_id, worker_id, attempt_number, status, started_at, finished_at, error_message, result
+WHERE id = $1 AND status = 'running'
+RETURNING id, job_id, worker_id, attempt_number, status, started_at, finished_at, error_message, result, lease_expires_at
 `
 
 type FinishExecutionParams struct {
@@ -82,12 +86,13 @@ func (q *Queries) FinishExecution(ctx context.Context, arg FinishExecutionParams
 		&i.FinishedAt,
 		&i.ErrorMessage,
 		&i.Result,
+		&i.LeaseExpiresAt,
 	)
 	return i, err
 }
 
 const getExecution = `-- name: GetExecution :one
-SELECT id, job_id, worker_id, attempt_number, status, started_at, finished_at, error_message, result FROM executions WHERE id = $1
+SELECT id, job_id, worker_id, attempt_number, status, started_at, finished_at, error_message, result, lease_expires_at FROM executions WHERE id = $1
 `
 
 func (q *Queries) GetExecution(ctx context.Context, id uuid.UUID) (Execution, error) {
@@ -103,12 +108,152 @@ func (q *Queries) GetExecution(ctx context.Context, id uuid.UUID) (Execution, er
 		&i.FinishedAt,
 		&i.ErrorMessage,
 		&i.Result,
+		&i.LeaseExpiresAt,
 	)
 	return i, err
 }
 
+const getExecutionForWorker = `-- name: GetExecutionForWorker :one
+SELECT id, job_id, worker_id, attempt_number, status, started_at, finished_at, error_message, result, lease_expires_at FROM executions
+WHERE id = $1 AND worker_id = $2
+`
+
+type GetExecutionForWorkerParams struct {
+	ID       uuid.UUID  `json:"id"`
+	WorkerID *uuid.UUID `json:"worker_id"`
+}
+
+func (q *Queries) GetExecutionForWorker(ctx context.Context, arg GetExecutionForWorkerParams) (Execution, error) {
+	row := q.db.QueryRow(ctx, getExecutionForWorker, arg.ID, arg.WorkerID)
+	var i Execution
+	err := row.Scan(
+		&i.ID,
+		&i.JobID,
+		&i.WorkerID,
+		&i.AttemptNumber,
+		&i.Status,
+		&i.StartedAt,
+		&i.FinishedAt,
+		&i.ErrorMessage,
+		&i.Result,
+		&i.LeaseExpiresAt,
+	)
+	return i, err
+}
+
+const getWorkerPoolStats = `-- name: GetWorkerPoolStats :many
+SELECT
+    worker_pools.id AS pool_id,
+    (
+        SELECT count(*)::int
+        FROM workers
+        WHERE workers.worker_pool_id = worker_pools.id
+          AND workers.status = 'online'
+    ) AS online_workers,
+    (
+        SELECT count(*)::int
+        FROM workers
+        WHERE workers.worker_pool_id = worker_pools.id
+          AND workers.status = 'offline'
+    ) AS offline_workers,
+    (
+        SELECT count(*)::int
+        FROM executions
+        JOIN workers ON workers.id = executions.worker_id
+        WHERE workers.worker_pool_id = worker_pools.id
+          AND executions.status = 'running'
+    ) AS running_jobs,
+    (
+        SELECT count(*)::int
+        FROM jobs
+        WHERE jobs.project_id = worker_pools.project_id
+          AND jobs.status IN ('pending', 'scheduled')
+          AND (
+              cardinality(worker_pools.queue_names) = 0
+              OR jobs.queue_name = ANY(worker_pools.queue_names)
+          )
+    ) AS queue_depth,
+    (
+        SELECT count(*)::int
+        FROM jobs
+        WHERE jobs.project_id = worker_pools.project_id
+          AND jobs.status = 'succeeded'
+          AND jobs.updated_at > now() - interval '1 hour'
+          AND (
+              cardinality(worker_pools.queue_names) = 0
+              OR jobs.queue_name = ANY(worker_pools.queue_names)
+          )
+    ) AS succeeded_last_hour,
+    (
+        SELECT count(*)::int
+        FROM jobs
+        WHERE jobs.project_id = worker_pools.project_id
+          AND jobs.status = 'failed'
+          AND jobs.updated_at > now() - interval '1 hour'
+          AND (
+              cardinality(worker_pools.queue_names) = 0
+              OR jobs.queue_name = ANY(worker_pools.queue_names)
+          )
+    ) AS failed_last_hour,
+    (
+        SELECT avg(extract(epoch FROM (executions.finished_at - executions.started_at)))::float8
+        FROM executions
+        JOIN jobs ON jobs.id = executions.job_id
+        WHERE jobs.project_id = worker_pools.project_id
+          AND executions.status = 'succeeded'
+          AND executions.finished_at > now() - interval '1 hour'
+          AND (
+              cardinality(worker_pools.queue_names) = 0
+              OR jobs.queue_name = ANY(worker_pools.queue_names)
+          )
+    ) AS avg_duration_seconds
+FROM worker_pools
+WHERE worker_pools.project_id = $1
+ORDER BY worker_pools.created_at ASC
+`
+
+type GetWorkerPoolStatsRow struct {
+	PoolID             uuid.UUID `json:"pool_id"`
+	OnlineWorkers      int32     `json:"online_workers"`
+	OfflineWorkers     int32     `json:"offline_workers"`
+	RunningJobs        int32     `json:"running_jobs"`
+	QueueDepth         int32     `json:"queue_depth"`
+	SucceededLastHour  int32     `json:"succeeded_last_hour"`
+	FailedLastHour     int32     `json:"failed_last_hour"`
+	AvgDurationSeconds float64   `json:"avg_duration_seconds"`
+}
+
+func (q *Queries) GetWorkerPoolStats(ctx context.Context, projectID uuid.UUID) ([]GetWorkerPoolStatsRow, error) {
+	rows, err := q.db.Query(ctx, getWorkerPoolStats, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []GetWorkerPoolStatsRow{}
+	for rows.Next() {
+		var i GetWorkerPoolStatsRow
+		if err := rows.Scan(
+			&i.PoolID,
+			&i.OnlineWorkers,
+			&i.OfflineWorkers,
+			&i.RunningJobs,
+			&i.QueueDepth,
+			&i.SucceededLastHour,
+			&i.FailedLastHour,
+			&i.AvgDurationSeconds,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listExecutionsByJob = `-- name: ListExecutionsByJob :many
-SELECT id, job_id, worker_id, attempt_number, status, started_at, finished_at, error_message, result FROM executions
+SELECT id, job_id, worker_id, attempt_number, status, started_at, finished_at, error_message, result, lease_expires_at FROM executions
 WHERE job_id = $1
 ORDER BY attempt_number
 `
@@ -132,6 +277,7 @@ func (q *Queries) ListExecutionsByJob(ctx context.Context, jobID uuid.UUID) ([]E
 			&i.FinishedAt,
 			&i.ErrorMessage,
 			&i.Result,
+			&i.LeaseExpiresAt,
 		); err != nil {
 			return nil, err
 		}
@@ -141,4 +287,129 @@ func (q *Queries) ListExecutionsByJob(ctx context.Context, jobID uuid.UUID) ([]E
 		return nil, err
 	}
 	return items, nil
+}
+
+const listExpiredExecutions = `-- name: ListExpiredExecutions :many
+SELECT id, job_id, worker_id, attempt_number, status, started_at, finished_at, error_message, result, lease_expires_at FROM executions
+WHERE status = 'running'
+  AND lease_expires_at IS NOT NULL
+  AND lease_expires_at < now()
+ORDER BY lease_expires_at
+LIMIT $1
+`
+
+func (q *Queries) ListExpiredExecutions(ctx context.Context, limit int32) ([]Execution, error) {
+	rows, err := q.db.Query(ctx, listExpiredExecutions, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Execution{}
+	for rows.Next() {
+		var i Execution
+		if err := rows.Scan(
+			&i.ID,
+			&i.JobID,
+			&i.WorkerID,
+			&i.AttemptNumber,
+			&i.Status,
+			&i.StartedAt,
+			&i.FinishedAt,
+			&i.ErrorMessage,
+			&i.Result,
+			&i.LeaseExpiresAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listWorkersWithLoad = `-- name: ListWorkersWithLoad :many
+SELECT
+    workers.id, workers.project_id, workers.name, workers.status, workers.last_heartbeat_at, workers.created_at, workers.worker_token_id, workers.worker_pool_id, workers.mode,
+    (
+        SELECT count(*)::int
+        FROM executions
+        WHERE executions.worker_id = workers.id
+          AND executions.status = 'running'
+    ) AS running_jobs
+
+FROM workers
+WHERE workers.project_id = $1
+  AND ($2::uuid IS NULL OR workers.worker_pool_id = $2::uuid)
+ORDER BY workers.created_at DESC
+`
+
+type ListWorkersWithLoadParams struct {
+	ProjectID uuid.UUID  `json:"project_id"`
+	PoolID    *uuid.UUID `json:"pool_id"`
+}
+
+type ListWorkersWithLoadRow struct {
+	ID              uuid.UUID  `json:"id"`
+	ProjectID       uuid.UUID  `json:"project_id"`
+	Name            string     `json:"name"`
+	Status          string     `json:"status"`
+	LastHeartbeatAt *time.Time `json:"last_heartbeat_at"`
+	CreatedAt       time.Time  `json:"created_at"`
+	WorkerTokenID   *uuid.UUID `json:"worker_token_id"`
+	WorkerPoolID    *uuid.UUID `json:"worker_pool_id"`
+	Mode            string     `json:"mode"`
+	RunningJobs     int32      `json:"running_jobs"`
+}
+
+func (q *Queries) ListWorkersWithLoad(ctx context.Context, arg ListWorkersWithLoadParams) ([]ListWorkersWithLoadRow, error) {
+	rows, err := q.db.Query(ctx, listWorkersWithLoad, arg.ProjectID, arg.PoolID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListWorkersWithLoadRow{}
+	for rows.Next() {
+		var i ListWorkersWithLoadRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ProjectID,
+			&i.Name,
+			&i.Status,
+			&i.LastHeartbeatAt,
+			&i.CreatedAt,
+			&i.WorkerTokenID,
+			&i.WorkerPoolID,
+			&i.Mode,
+			&i.RunningJobs,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const renewWorkerLeases = `-- name: RenewWorkerLeases :execrows
+UPDATE executions
+SET lease_expires_at = now() + make_interval(secs => $1::int)
+WHERE worker_id = $2
+  AND status = 'running'
+`
+
+type RenewWorkerLeasesParams struct {
+	LeaseSeconds int32      `json:"lease_seconds"`
+	WorkerID     *uuid.UUID `json:"worker_id"`
+}
+
+func (q *Queries) RenewWorkerLeases(ctx context.Context, arg RenewWorkerLeasesParams) (int64, error) {
+	result, err := q.db.Exec(ctx, renewWorkerLeases, arg.LeaseSeconds, arg.WorkerID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

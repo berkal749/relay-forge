@@ -18,7 +18,7 @@ SET consumed_at = now()
 WHERE id = $1
   AND kind = 'enrollment'
   AND consumed_at IS NULL
-RETURNING id, project_id, token_hash, token_prefix, name, revoked_at, expires_at, last_used_at, created_at, pool_id, kind, consumed_at
+RETURNING id, project_id, token_hash, token_prefix, name, revoked_at, expires_at, last_used_at, created_at, pool_id, kind, consumed_at, rotated_at, replaced_by_id
 `
 
 func (q *Queries) ConsumeEnrollmentToken(ctx context.Context, id uuid.UUID) (WorkerToken, error) {
@@ -37,6 +37,8 @@ func (q *Queries) ConsumeEnrollmentToken(ctx context.Context, id uuid.UUID) (Wor
 		&i.PoolID,
 		&i.Kind,
 		&i.ConsumedAt,
+		&i.RotatedAt,
+		&i.ReplacedByID,
 	)
 	return i, err
 }
@@ -44,7 +46,7 @@ func (q *Queries) ConsumeEnrollmentToken(ctx context.Context, id uuid.UUID) (Wor
 const createWorkerToken = `-- name: CreateWorkerToken :one
 INSERT INTO worker_tokens (project_id, pool_id, kind, token_hash, token_prefix, name, expires_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, project_id, token_hash, token_prefix, name, revoked_at, expires_at, last_used_at, created_at, pool_id, kind, consumed_at
+RETURNING id, project_id, token_hash, token_prefix, name, revoked_at, expires_at, last_used_at, created_at, pool_id, kind, consumed_at, rotated_at, replaced_by_id
 `
 
 type CreateWorkerTokenParams struct {
@@ -81,12 +83,14 @@ func (q *Queries) CreateWorkerToken(ctx context.Context, arg CreateWorkerTokenPa
 		&i.PoolID,
 		&i.Kind,
 		&i.ConsumedAt,
+		&i.RotatedAt,
+		&i.ReplacedByID,
 	)
 	return i, err
 }
 
 const getEnrollmentTokenByHash = `-- name: GetEnrollmentTokenByHash :one
-SELECT worker_tokens.id, worker_tokens.project_id, worker_tokens.token_hash, worker_tokens.token_prefix, worker_tokens.name, worker_tokens.revoked_at, worker_tokens.expires_at, worker_tokens.last_used_at, worker_tokens.created_at, worker_tokens.pool_id, worker_tokens.kind, worker_tokens.consumed_at FROM worker_tokens
+SELECT worker_tokens.id, worker_tokens.project_id, worker_tokens.token_hash, worker_tokens.token_prefix, worker_tokens.name, worker_tokens.revoked_at, worker_tokens.expires_at, worker_tokens.last_used_at, worker_tokens.created_at, worker_tokens.pool_id, worker_tokens.kind, worker_tokens.consumed_at, worker_tokens.rotated_at, worker_tokens.replaced_by_id FROM worker_tokens
 JOIN worker_pools ON worker_pools.id = worker_tokens.pool_id
 JOIN projects ON projects.id = worker_tokens.project_id
 WHERE worker_tokens.token_hash = $1
@@ -114,12 +118,14 @@ func (q *Queries) GetEnrollmentTokenByHash(ctx context.Context, tokenHash string
 		&i.PoolID,
 		&i.Kind,
 		&i.ConsumedAt,
+		&i.RotatedAt,
+		&i.ReplacedByID,
 	)
 	return i, err
 }
 
 const getWorkerTokenByHash = `-- name: GetWorkerTokenByHash :one
-SELECT worker_tokens.id, worker_tokens.project_id, worker_tokens.token_hash, worker_tokens.token_prefix, worker_tokens.name, worker_tokens.revoked_at, worker_tokens.expires_at, worker_tokens.last_used_at, worker_tokens.created_at, worker_tokens.pool_id, worker_tokens.kind, worker_tokens.consumed_at FROM worker_tokens
+SELECT worker_tokens.id, worker_tokens.project_id, worker_tokens.token_hash, worker_tokens.token_prefix, worker_tokens.name, worker_tokens.revoked_at, worker_tokens.expires_at, worker_tokens.last_used_at, worker_tokens.created_at, worker_tokens.pool_id, worker_tokens.kind, worker_tokens.consumed_at, worker_tokens.rotated_at, worker_tokens.replaced_by_id FROM worker_tokens
 JOIN projects ON projects.id = worker_tokens.project_id
 LEFT JOIN worker_pools ON worker_pools.id = worker_tokens.pool_id
 WHERE worker_tokens.token_hash = $1
@@ -146,12 +152,46 @@ func (q *Queries) GetWorkerTokenByHash(ctx context.Context, tokenHash string) (W
 		&i.PoolID,
 		&i.Kind,
 		&i.ConsumedAt,
+		&i.RotatedAt,
+		&i.ReplacedByID,
+	)
+	return i, err
+}
+
+const getWorkerTokenForProject = `-- name: GetWorkerTokenForProject :one
+SELECT id, project_id, token_hash, token_prefix, name, revoked_at, expires_at, last_used_at, created_at, pool_id, kind, consumed_at, rotated_at, replaced_by_id FROM worker_tokens
+WHERE id = $1 AND project_id = $2 AND kind = 'worker'
+`
+
+type GetWorkerTokenForProjectParams struct {
+	ID        uuid.UUID `json:"id"`
+	ProjectID uuid.UUID `json:"project_id"`
+}
+
+func (q *Queries) GetWorkerTokenForProject(ctx context.Context, arg GetWorkerTokenForProjectParams) (WorkerToken, error) {
+	row := q.db.QueryRow(ctx, getWorkerTokenForProject, arg.ID, arg.ProjectID)
+	var i WorkerToken
+	err := row.Scan(
+		&i.ID,
+		&i.ProjectID,
+		&i.TokenHash,
+		&i.TokenPrefix,
+		&i.Name,
+		&i.RevokedAt,
+		&i.ExpiresAt,
+		&i.LastUsedAt,
+		&i.CreatedAt,
+		&i.PoolID,
+		&i.Kind,
+		&i.ConsumedAt,
+		&i.RotatedAt,
+		&i.ReplacedByID,
 	)
 	return i, err
 }
 
 const listWorkerTokensByProject = `-- name: ListWorkerTokensByProject :many
-SELECT id, project_id, token_hash, token_prefix, name, revoked_at, expires_at, last_used_at, created_at, pool_id, kind, consumed_at FROM worker_tokens
+SELECT id, project_id, token_hash, token_prefix, name, revoked_at, expires_at, last_used_at, created_at, pool_id, kind, consumed_at, rotated_at, replaced_by_id FROM worker_tokens
 WHERE project_id = $1
   AND kind = 'worker'
 ORDER BY created_at DESC
@@ -179,6 +219,8 @@ func (q *Queries) ListWorkerTokensByProject(ctx context.Context, projectID uuid.
 			&i.PoolID,
 			&i.Kind,
 			&i.ConsumedAt,
+			&i.RotatedAt,
+			&i.ReplacedByID,
 		); err != nil {
 			return nil, err
 		}
@@ -194,7 +236,7 @@ const revokeWorkerToken = `-- name: RevokeWorkerToken :one
 UPDATE worker_tokens
 SET revoked_at = now()
 WHERE id = $1 AND project_id = $2 AND revoked_at IS NULL
-RETURNING id, project_id, token_hash, token_prefix, name, revoked_at, expires_at, last_used_at, created_at, pool_id, kind, consumed_at
+RETURNING id, project_id, token_hash, token_prefix, name, revoked_at, expires_at, last_used_at, created_at, pool_id, kind, consumed_at, rotated_at, replaced_by_id
 `
 
 type RevokeWorkerTokenParams struct {
@@ -218,6 +260,57 @@ func (q *Queries) RevokeWorkerToken(ctx context.Context, arg RevokeWorkerTokenPa
 		&i.PoolID,
 		&i.Kind,
 		&i.ConsumedAt,
+		&i.RotatedAt,
+		&i.ReplacedByID,
+	)
+	return i, err
+}
+
+const rotateWorkerToken = `-- name: RotateWorkerToken :one
+UPDATE worker_tokens
+SET rotated_at = now(),
+    replaced_by_id = $1,
+    expires_at = LEAST(
+        COALESCE(expires_at, now() + make_interval(secs => $2::int)),
+        now() + make_interval(secs => $2::int)
+    )
+WHERE id = $3
+  AND project_id = $4
+  AND kind = 'worker'
+  AND revoked_at IS NULL
+RETURNING id, project_id, token_hash, token_prefix, name, revoked_at, expires_at, last_used_at, created_at, pool_id, kind, consumed_at, rotated_at, replaced_by_id
+`
+
+type RotateWorkerTokenParams struct {
+	ReplacedByID *uuid.UUID `json:"replaced_by_id"`
+	GraceSeconds int32      `json:"grace_seconds"`
+	ID           uuid.UUID  `json:"id"`
+	ProjectID    uuid.UUID  `json:"project_id"`
+}
+
+func (q *Queries) RotateWorkerToken(ctx context.Context, arg RotateWorkerTokenParams) (WorkerToken, error) {
+	row := q.db.QueryRow(ctx, rotateWorkerToken,
+		arg.ReplacedByID,
+		arg.GraceSeconds,
+		arg.ID,
+		arg.ProjectID,
+	)
+	var i WorkerToken
+	err := row.Scan(
+		&i.ID,
+		&i.ProjectID,
+		&i.TokenHash,
+		&i.TokenPrefix,
+		&i.Name,
+		&i.RevokedAt,
+		&i.ExpiresAt,
+		&i.LastUsedAt,
+		&i.CreatedAt,
+		&i.PoolID,
+		&i.Kind,
+		&i.ConsumedAt,
+		&i.RotatedAt,
+		&i.ReplacedByID,
 	)
 	return i, err
 }

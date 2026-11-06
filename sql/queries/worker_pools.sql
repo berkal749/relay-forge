@@ -9,9 +9,10 @@ INSERT INTO worker_pools (
     max_attempts,
     retry_backoff,
     retry_base_delay_seconds,
-    retry_max_delay_seconds
+    retry_max_delay_seconds,
+    allowed_cidrs
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 RETURNING *;
 
 -- name: GetWorkerPool :one
@@ -41,6 +42,7 @@ SET name = COALESCE(sqlc.narg('name'), name),
     retry_backoff = COALESCE(sqlc.narg('retry_backoff'), retry_backoff),
     retry_base_delay_seconds = COALESCE(sqlc.narg('retry_base_delay_seconds'), retry_base_delay_seconds),
     retry_max_delay_seconds = COALESCE(sqlc.narg('retry_max_delay_seconds'), retry_max_delay_seconds),
+    allowed_cidrs = COALESCE(sqlc.narg('allowed_cidrs')::text[], allowed_cidrs),
     updated_at = now()
 WHERE id = $1 AND project_id = $2
 RETURNING *;

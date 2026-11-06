@@ -109,7 +109,7 @@ func TestValidatePolicy(t *testing.T) {
 			if test.name == "timeout too high" {
 				timeout = 86401
 			}
-			_, _, err := validatePolicy(nil, timeout, 0, test.backoff, test.base, test.maxDelay)
+			_, _, _, err := validatePolicy(nil, timeout, 0, test.backoff, test.base, test.maxDelay, nil)
 			if test.wantErr && err == nil {
 				t.Fatal("validatePolicy() expected error")
 			}
@@ -128,5 +128,28 @@ func TestUpdateInputEmptyWithPolicyFields(t *testing.T) {
 	}
 	if (UpdateInput{JobTimeoutSeconds: &timeout}).Empty() {
 		t.Fatal("UpdateInput with timeout should not report empty")
+	}
+}
+
+func TestNormalizeCIDRs(t *testing.T) {
+	got, err := normalizeCIDRs([]string{"203.0.113.7", "10.0.0.0/8", "10.0.0.0/8", "2001:db8::1"})
+	if err != nil {
+		t.Fatalf("normalizeCIDRs() error = %v", err)
+	}
+	want := []string{"203.0.113.7/32", "10.0.0.0/8", "2001:db8::1/128"}
+	if len(got) != len(want) {
+		t.Fatalf("normalizeCIDRs() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("normalizeCIDRs()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	if _, err := normalizeCIDRs([]string{"not-a-cidr"}); err == nil {
+		t.Fatal("normalizeCIDRs() expected error for invalid CIDR")
+	}
+	if _, err := normalizeCIDRs(make([]string, 51)); err == nil {
+		t.Fatal("normalizeCIDRs() expected error for too many entries")
 	}
 }

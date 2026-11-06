@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Ban, Copy, Loader2, Plus, Server } from "lucide-react"
+import { Ban, Copy, Loader2, Plus, RefreshCw, Server } from "lucide-react"
 import { toast } from "sonner"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -43,6 +43,18 @@ export function WorkerTokenPanel({ projectId }: { projectId: string }) {
     },
     onError: (error) => {
       toast.error(error instanceof ApiError ? error.message : "Could not create worker token")
+    },
+  })
+
+  const rotateToken = useMutation({
+    mutationFn: (tokenId: string) => api.rotateWorkerToken(token!, projectId, tokenId),
+    onSuccess: (result) => {
+      setRawToken(result.token)
+      queryClient.invalidateQueries({ queryKey: ["worker-tokens", projectId] })
+      toast.success("Worker token rotated; the old token keeps working during the grace period")
+    },
+    onError: (error) => {
+      toast.error(error instanceof ApiError ? error.message : "Could not rotate worker token")
     },
   })
 
@@ -160,6 +172,8 @@ export function WorkerTokenPanel({ projectId }: { projectId: string }) {
                 workerToken={item}
                 onRevoke={() => revokeToken.mutate(item.id)}
                 revoking={revokeToken.isPending && revokeToken.variables === item.id}
+                onRotate={() => rotateToken.mutate(item.id)}
+                rotating={rotateToken.isPending && rotateToken.variables === item.id}
               />
             ))}
           </div>
@@ -173,10 +187,14 @@ function WorkerTokenRow({
   workerToken,
   onRevoke,
   revoking,
+  onRotate,
+  rotating,
 }: {
   workerToken: WorkerToken
   onRevoke: () => void
   revoking: boolean
+  onRotate: () => void
+  rotating: boolean
 }) {
   return (
     <div className="flex items-center justify-between gap-3 px-3 py-3">
@@ -192,23 +210,41 @@ function WorkerTokenRow({
           Created {formatDate(workerToken.created_at)}
           {workerToken.expires_at && ` · Expires ${formatDate(workerToken.expires_at)}`}
           {workerToken.last_used_at && ` · Last used ${formatDate(workerToken.last_used_at)}`}
+          {workerToken.rotated_at && ` · Rotated ${formatDate(workerToken.rotated_at)}`}
         </p>
       </div>
       {!workerToken.revoked_at && (
-        <Button
-          type="button"
-          size="icon-sm"
-          variant="ghost"
-          onClick={onRevoke}
-          disabled={revoking}
-          aria-label={`Revoke ${workerToken.name}`}
-        >
-          {revoking ? (
-            <Loader2 className="size-3.5 animate-spin" />
-          ) : (
-            <Ban className="size-3.5" />
-          )}
-        </Button>
+        <div className="flex items-center gap-1">
+          <Button
+            type="button"
+            size="icon-sm"
+            variant="ghost"
+            onClick={onRotate}
+            disabled={rotating}
+            aria-label={`Rotate ${workerToken.name}`}
+            title="Rotate token"
+          >
+            {rotating ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <RefreshCw className="size-3.5" />
+            )}
+          </Button>
+          <Button
+            type="button"
+            size="icon-sm"
+            variant="ghost"
+            onClick={onRevoke}
+            disabled={revoking}
+            aria-label={`Revoke ${workerToken.name}`}
+          >
+            {revoking ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <Ban className="size-3.5" />
+            )}
+          </Button>
+        </div>
       )}
     </div>
   )

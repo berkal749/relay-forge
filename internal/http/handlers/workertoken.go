@@ -16,7 +16,8 @@ import (
 )
 
 type WorkerTokenHandler struct {
-	service *workertoken.Service
+	service       *workertoken.Service
+	rotationGrace time.Duration
 }
 
 type workerTokenRequest struct {
@@ -25,18 +26,23 @@ type workerTokenRequest struct {
 }
 
 type workerTokenResponse struct {
-	ID          uuid.UUID  `json:"id"`
-	ProjectID   uuid.UUID  `json:"project_id"`
-	Name        string     `json:"name"`
-	TokenPrefix string     `json:"token_prefix"`
-	RevokedAt   *time.Time `json:"revoked_at"`
-	ExpiresAt   *time.Time `json:"expires_at"`
-	LastUsedAt  *time.Time `json:"last_used_at"`
-	CreatedAt   time.Time  `json:"created_at"`
+	ID           uuid.UUID  `json:"id"`
+	ProjectID    uuid.UUID  `json:"project_id"`
+	Name         string     `json:"name"`
+	TokenPrefix  string     `json:"token_prefix"`
+	RevokedAt    *time.Time `json:"revoked_at"`
+	ExpiresAt    *time.Time `json:"expires_at"`
+	LastUsedAt   *time.Time `json:"last_used_at"`
+	RotatedAt    *time.Time `json:"rotated_at"`
+	ReplacedByID *uuid.UUID `json:"replaced_by_id"`
+	CreatedAt    time.Time  `json:"created_at"`
 }
 
-func NewWorkerTokenHandler(service *workertoken.Service) *WorkerTokenHandler {
-	return &WorkerTokenHandler{service: service}
+func NewWorkerTokenHandler(service *workertoken.Service, rotationGrace time.Duration) *WorkerTokenHandler {
+	if rotationGrace <= 0 {
+		rotationGrace = 24 * time.Hour
+	}
+	return &WorkerTokenHandler{service: service, rotationGrace: rotationGrace}
 }
 
 func (h *WorkerTokenHandler) Create(w http.ResponseWriter, r *http.Request) {
@@ -100,6 +106,37 @@ func (h *WorkerTokenHandler) List(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *WorkerTokenHandler) Rotate(w http.ResponseWriter, r *http.Request) {
+	session, ok := middleware.SessionFromContext(r.Context())
+	if !ok {
+		httpx.WriteError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	projectID, err := uuid.Parse(r.PathValue("projectID"))
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid project id")
+		return
+	}
+	tokenID, err := uuid.Parse(r.PathValue("tokenID"))
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid worker token id")
+		return
+	}
+
+	created, err := h.service.Rotate(r.Context(), session.User.ID, projectID, tokenID, h.rotationGrace)
+	if err != nil {
+		writeWorkerTokenError(w, "rotate worker token", err)
+		return
+	}
+
+	w.Header().Set("Cache-Control", "no-store")
+	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
+		"worker_token":  toWorkerTokenResponse(created.Token),
+		"token":         created.RawToken,
+		"grace_seconds": int64(h.rotationGrace / time.Second),
+	})
+}
+
 func (h *WorkerTokenHandler) Revoke(w http.ResponseWriter, r *http.Request) {
 	session, ok := middleware.SessionFromContext(r.Context())
 	if !ok {
@@ -129,14 +166,16 @@ func (h *WorkerTokenHandler) Revoke(w http.ResponseWriter, r *http.Request) {
 
 func toWorkerTokenResponse(token db.WorkerToken) workerTokenResponse {
 	return workerTokenResponse{
-		ID:          token.ID,
-		ProjectID:   token.ProjectID,
-		Name:        token.Name,
-		TokenPrefix: token.TokenPrefix,
-		RevokedAt:   token.RevokedAt,
-		ExpiresAt:   token.ExpiresAt,
-		LastUsedAt:  token.LastUsedAt,
-		CreatedAt:   token.CreatedAt,
+		ID:           token.ID,
+		ProjectID:    token.ProjectID,
+		Name:         token.Name,
+		TokenPrefix:  token.TokenPrefix,
+		RevokedAt:    token.RevokedAt,
+		ExpiresAt:    token.ExpiresAt,
+		LastUsedAt:   token.LastUsedAt,
+		RotatedAt:    token.RotatedAt,
+		ReplacedByID: token.ReplacedByID,
+		CreatedAt:    token.CreatedAt,
 	}
 }
 
@@ -148,6 +187,8 @@ func writeWorkerTokenError(w http.ResponseWriter, operation string, err error) {
 		httpx.WriteError(w, http.StatusBadRequest, "expires_in_days must be between 1 and 3650")
 	case errors.Is(err, project.ErrProjectNotFound):
 		httpx.WriteError(w, http.StatusNotFound, "project not found")
+	case errors.Is(err, workertoken.ErrInvalidGrace):
+		httpx.WriteError(w, http.StatusBadRequest, "token rotation grace must be between 1 hour and 30 days")
 	case errors.Is(err, workertoken.ErrTokenNotFound):
 		httpx.WriteError(w, http.StatusNotFound, "worker token not found")
 	default:

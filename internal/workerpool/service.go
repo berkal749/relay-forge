@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -31,6 +32,7 @@ const (
 	maxJobTimeoutSec = 86400
 	maxAttempts      = 100
 	maxRetryDelaySec = 86400
+	maxAllowedCIDRs  = 50
 
 	defaultEnrollTTL = 15 * time.Minute
 )
@@ -44,6 +46,7 @@ var (
 	ErrInvalidMaxAttempts  = errors.New("worker pool max attempts must be between 0 and 100")
 	ErrInvalidRetryBackoff = errors.New("worker pool retry backoff must be fixed or exponential")
 	ErrInvalidRetryDelay   = errors.New("worker pool retry delays must be between 0 and 86400 seconds, with max >= base")
+	ErrInvalidAllowedCIDRs = errors.New("worker pool allowed CIDRs must be valid IPv4/IPv6 CIDRs and contain at most 50 entries")
 	ErrEmptyUpdate         = errors.New("update must contain at least one field")
 	ErrPoolNotFound        = errors.New("worker pool not found")
 	ErrNameTaken           = errors.New("a worker pool with that name already exists")
@@ -58,6 +61,7 @@ type CreateInput struct {
 	RetryBackoff          string
 	RetryBaseDelaySeconds int32
 	RetryMaxDelaySeconds  int32
+	AllowedCIDRs          []string
 }
 
 type UpdateInput struct {
@@ -70,6 +74,7 @@ type UpdateInput struct {
 	RetryBackoff          *string
 	RetryBaseDelaySeconds *int32
 	RetryMaxDelaySeconds  *int32
+	AllowedCIDRs          *[]string
 }
 
 func (i UpdateInput) Empty() bool {
@@ -81,7 +86,8 @@ func (i UpdateInput) Empty() bool {
 		i.MaxAttempts == nil &&
 		i.RetryBackoff == nil &&
 		i.RetryBaseDelaySeconds == nil &&
-		i.RetryMaxDelaySeconds == nil
+		i.RetryMaxDelaySeconds == nil &&
+		i.AllowedCIDRs == nil
 }
 
 type Service struct {
@@ -108,13 +114,14 @@ func (s *Service) Create(ctx context.Context, userID, projectID uuid.UUID, input
 	if input.RetryBackoff == "" {
 		input.RetryBackoff = BackoffExponential
 	}
-	queueNames, backoff, err := validatePolicy(
+	queueNames, backoff, allowedCIDRs, err := validatePolicy(
 		input.QueueNames,
 		input.JobTimeoutSeconds,
 		input.MaxAttempts,
 		input.RetryBackoff,
 		input.RetryBaseDelaySeconds,
 		input.RetryMaxDelaySeconds,
+		input.AllowedCIDRs,
 	)
 	if err != nil {
 		return db.WorkerPool{}, err
@@ -135,6 +142,7 @@ func (s *Service) Create(ctx context.Context, userID, projectID uuid.UUID, input
 		RetryBackoff:          backoff,
 		RetryBaseDelaySeconds: input.RetryBaseDelaySeconds,
 		RetryMaxDelaySeconds:  input.RetryMaxDelaySeconds,
+		AllowedCidrs:          allowedCIDRs,
 	})
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -155,6 +163,31 @@ func (s *Service) List(ctx context.Context, userID, projectID uuid.UUID) ([]db.W
 		return nil, fmt.Errorf("list worker pools: %w", err)
 	}
 	return pools, nil
+}
+
+func (s *Service) Stats(ctx context.Context, userID, projectID uuid.UUID) ([]db.GetWorkerPoolStatsRow, error) {
+	if _, err := s.projects.GetOwned(ctx, userID, projectID); err != nil {
+		return nil, err
+	}
+	stats, err := s.queries.GetWorkerPoolStats(ctx, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("worker pool stats: %w", err)
+	}
+	return stats, nil
+}
+
+func (s *Service) Workers(ctx context.Context, userID, projectID uuid.UUID, poolID *uuid.UUID) ([]db.ListWorkersWithLoadRow, error) {
+	if _, err := s.projects.GetOwned(ctx, userID, projectID); err != nil {
+		return nil, err
+	}
+	workers, err := s.queries.ListWorkersWithLoad(ctx, db.ListWorkersWithLoadParams{
+		ProjectID: projectID,
+		PoolID:    poolID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list workers: %w", err)
+	}
+	return workers, nil
 }
 
 func (s *Service) Update(ctx context.Context, userID, projectID, poolID uuid.UUID, input UpdateInput) (db.WorkerPool, error) {
@@ -224,6 +257,13 @@ func (s *Service) Update(ctx context.Context, userID, projectID, poolID uuid.UUI
 			return db.WorkerPool{}, err
 		}
 		params.RetryMaxDelaySeconds = input.RetryMaxDelaySeconds
+	}
+	if input.AllowedCIDRs != nil {
+		allowedCIDRs, err := normalizeCIDRs(*input.AllowedCIDRs)
+		if err != nil {
+			return db.WorkerPool{}, err
+		}
+		params.AllowedCidrs = allowedCIDRs
 	}
 	if input.RetryBaseDelaySeconds != nil && input.RetryMaxDelaySeconds != nil {
 		if *input.RetryBaseDelaySeconds > 0 && *input.RetryMaxDelaySeconds > 0 &&
@@ -311,31 +351,35 @@ func validateConcurrency(concurrency int32) error {
 	return nil
 }
 
-func validatePolicy(queueNames []string, jobTimeoutSeconds, maxAttemptsValue int32, backoff string, baseDelaySeconds, maxDelaySeconds int32) ([]string, string, error) {
+func validatePolicy(queueNames []string, jobTimeoutSeconds, maxAttemptsValue int32, backoff string, baseDelaySeconds, maxDelaySeconds int32, cidrs []string) ([]string, string, []string, error) {
 	normalizedQueues, err := normalizeQueueNames(queueNames)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	if err := validateJobTimeout(jobTimeoutSeconds); err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	if err := validateMaxAttempts(maxAttemptsValue); err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	normalizedBackoff, err := validateBackoff(backoff)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	if err := validateDelay(baseDelaySeconds); err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	if err := validateDelay(maxDelaySeconds); err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	if baseDelaySeconds > 0 && maxDelaySeconds > 0 && maxDelaySeconds < baseDelaySeconds {
-		return nil, "", ErrInvalidRetryDelay
+		return nil, "", nil, ErrInvalidRetryDelay
 	}
-	return normalizedQueues, normalizedBackoff, nil
+	normalizedCIDRs, err := normalizeCIDRs(cidrs)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	return normalizedQueues, normalizedBackoff, normalizedCIDRs, nil
 }
 
 func normalizeQueueNames(queueNames []string) ([]string, error) {
@@ -354,6 +398,37 @@ func normalizeQueueNames(queueNames []string) ([]string, error) {
 		}
 		seen[queue] = struct{}{}
 		normalized = append(normalized, queue)
+	}
+	return normalized, nil
+}
+
+func normalizeCIDRs(cidrs []string) ([]string, error) {
+	if len(cidrs) > maxAllowedCIDRs {
+		return nil, ErrInvalidAllowedCIDRs
+	}
+	normalized := make([]string, 0, len(cidrs))
+	seen := make(map[string]struct{}, len(cidrs))
+	for _, cidr := range cidrs {
+		cidr = strings.TrimSpace(cidr)
+		if cidr == "" {
+			return nil, ErrInvalidAllowedCIDRs
+		}
+		if _, network, parseErr := net.ParseCIDR(cidr); parseErr == nil {
+			cidr = network.String()
+		} else if ip := net.ParseIP(cidr); ip != nil {
+			if ip.To4() != nil {
+				cidr = ip.String() + "/32"
+			} else {
+				cidr = ip.String() + "/128"
+			}
+		} else {
+			return nil, ErrInvalidAllowedCIDRs
+		}
+		if _, ok := seen[cidr]; ok {
+			continue
+		}
+		seen[cidr] = struct{}{}
+		normalized = append(normalized, cidr)
 	}
 	return normalized, nil
 }

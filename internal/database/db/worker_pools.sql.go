@@ -22,10 +22,11 @@ INSERT INTO worker_pools (
     max_attempts,
     retry_backoff,
     retry_base_delay_seconds,
-    retry_max_delay_seconds
+    retry_max_delay_seconds,
+    allowed_cidrs
 )
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-RETURNING id, project_id, name, concurrency, status, created_at, updated_at, queue_names, job_timeout_seconds, max_attempts, retry_backoff, retry_base_delay_seconds, retry_max_delay_seconds
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+RETURNING id, project_id, name, concurrency, status, created_at, updated_at, queue_names, job_timeout_seconds, max_attempts, retry_backoff, retry_base_delay_seconds, retry_max_delay_seconds, allowed_cidrs
 `
 
 type CreateWorkerPoolParams struct {
@@ -39,6 +40,7 @@ type CreateWorkerPoolParams struct {
 	RetryBackoff          string    `json:"retry_backoff"`
 	RetryBaseDelaySeconds int32     `json:"retry_base_delay_seconds"`
 	RetryMaxDelaySeconds  int32     `json:"retry_max_delay_seconds"`
+	AllowedCidrs          []string  `json:"allowed_cidrs"`
 }
 
 func (q *Queries) CreateWorkerPool(ctx context.Context, arg CreateWorkerPoolParams) (WorkerPool, error) {
@@ -53,6 +55,7 @@ func (q *Queries) CreateWorkerPool(ctx context.Context, arg CreateWorkerPoolPara
 		arg.RetryBackoff,
 		arg.RetryBaseDelaySeconds,
 		arg.RetryMaxDelaySeconds,
+		arg.AllowedCidrs,
 	)
 	var i WorkerPool
 	err := row.Scan(
@@ -69,6 +72,7 @@ func (q *Queries) CreateWorkerPool(ctx context.Context, arg CreateWorkerPoolPara
 		&i.RetryBackoff,
 		&i.RetryBaseDelaySeconds,
 		&i.RetryMaxDelaySeconds,
+		&i.AllowedCidrs,
 	)
 	return i, err
 }
@@ -92,7 +96,7 @@ func (q *Queries) DeleteWorkerPool(ctx context.Context, arg DeleteWorkerPoolPara
 }
 
 const getWorkerPool = `-- name: GetWorkerPool :one
-SELECT id, project_id, name, concurrency, status, created_at, updated_at, queue_names, job_timeout_seconds, max_attempts, retry_backoff, retry_base_delay_seconds, retry_max_delay_seconds FROM worker_pools
+SELECT id, project_id, name, concurrency, status, created_at, updated_at, queue_names, job_timeout_seconds, max_attempts, retry_backoff, retry_base_delay_seconds, retry_max_delay_seconds, allowed_cidrs FROM worker_pools
 WHERE id = $1 AND project_id = $2
 `
 
@@ -118,12 +122,13 @@ func (q *Queries) GetWorkerPool(ctx context.Context, arg GetWorkerPoolParams) (W
 		&i.RetryBackoff,
 		&i.RetryBaseDelaySeconds,
 		&i.RetryMaxDelaySeconds,
+		&i.AllowedCidrs,
 	)
 	return i, err
 }
 
 const listActiveWorkerPools = `-- name: ListActiveWorkerPools :many
-SELECT worker_pools.id, worker_pools.project_id, worker_pools.name, worker_pools.concurrency, worker_pools.status, worker_pools.created_at, worker_pools.updated_at, worker_pools.queue_names, worker_pools.job_timeout_seconds, worker_pools.max_attempts, worker_pools.retry_backoff, worker_pools.retry_base_delay_seconds, worker_pools.retry_max_delay_seconds FROM worker_pools
+SELECT worker_pools.id, worker_pools.project_id, worker_pools.name, worker_pools.concurrency, worker_pools.status, worker_pools.created_at, worker_pools.updated_at, worker_pools.queue_names, worker_pools.job_timeout_seconds, worker_pools.max_attempts, worker_pools.retry_backoff, worker_pools.retry_base_delay_seconds, worker_pools.retry_max_delay_seconds, worker_pools.allowed_cidrs FROM worker_pools
 JOIN projects ON projects.id = worker_pools.project_id
 WHERE worker_pools.status = 'active'
   AND projects.archived_at IS NULL
@@ -153,6 +158,7 @@ func (q *Queries) ListActiveWorkerPools(ctx context.Context) ([]WorkerPool, erro
 			&i.RetryBackoff,
 			&i.RetryBaseDelaySeconds,
 			&i.RetryMaxDelaySeconds,
+			&i.AllowedCidrs,
 		); err != nil {
 			return nil, err
 		}
@@ -165,7 +171,7 @@ func (q *Queries) ListActiveWorkerPools(ctx context.Context) ([]WorkerPool, erro
 }
 
 const listWorkerPoolsByProject = `-- name: ListWorkerPoolsByProject :many
-SELECT id, project_id, name, concurrency, status, created_at, updated_at, queue_names, job_timeout_seconds, max_attempts, retry_backoff, retry_base_delay_seconds, retry_max_delay_seconds FROM worker_pools
+SELECT id, project_id, name, concurrency, status, created_at, updated_at, queue_names, job_timeout_seconds, max_attempts, retry_backoff, retry_base_delay_seconds, retry_max_delay_seconds, allowed_cidrs FROM worker_pools
 WHERE project_id = $1
 ORDER BY created_at DESC
 `
@@ -193,6 +199,7 @@ func (q *Queries) ListWorkerPoolsByProject(ctx context.Context, projectID uuid.U
 			&i.RetryBackoff,
 			&i.RetryBaseDelaySeconds,
 			&i.RetryMaxDelaySeconds,
+			&i.AllowedCidrs,
 		); err != nil {
 			return nil, err
 		}
@@ -215,9 +222,10 @@ SET name = COALESCE($3, name),
     retry_backoff = COALESCE($9, retry_backoff),
     retry_base_delay_seconds = COALESCE($10, retry_base_delay_seconds),
     retry_max_delay_seconds = COALESCE($11, retry_max_delay_seconds),
+    allowed_cidrs = COALESCE($12::text[], allowed_cidrs),
     updated_at = now()
 WHERE id = $1 AND project_id = $2
-RETURNING id, project_id, name, concurrency, status, created_at, updated_at, queue_names, job_timeout_seconds, max_attempts, retry_backoff, retry_base_delay_seconds, retry_max_delay_seconds
+RETURNING id, project_id, name, concurrency, status, created_at, updated_at, queue_names, job_timeout_seconds, max_attempts, retry_backoff, retry_base_delay_seconds, retry_max_delay_seconds, allowed_cidrs
 `
 
 type UpdateWorkerPoolParams struct {
@@ -232,6 +240,7 @@ type UpdateWorkerPoolParams struct {
 	RetryBackoff          *string   `json:"retry_backoff"`
 	RetryBaseDelaySeconds *int32    `json:"retry_base_delay_seconds"`
 	RetryMaxDelaySeconds  *int32    `json:"retry_max_delay_seconds"`
+	AllowedCidrs          []string  `json:"allowed_cidrs"`
 }
 
 func (q *Queries) UpdateWorkerPool(ctx context.Context, arg UpdateWorkerPoolParams) (WorkerPool, error) {
@@ -247,6 +256,7 @@ func (q *Queries) UpdateWorkerPool(ctx context.Context, arg UpdateWorkerPoolPara
 		arg.RetryBackoff,
 		arg.RetryBaseDelaySeconds,
 		arg.RetryMaxDelaySeconds,
+		arg.AllowedCidrs,
 	)
 	var i WorkerPool
 	err := row.Scan(
@@ -263,6 +273,7 @@ func (q *Queries) UpdateWorkerPool(ctx context.Context, arg UpdateWorkerPoolPara
 		&i.RetryBackoff,
 		&i.RetryBaseDelaySeconds,
 		&i.RetryMaxDelaySeconds,
+		&i.AllowedCidrs,
 	)
 	return i, err
 }

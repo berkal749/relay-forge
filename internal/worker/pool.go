@@ -8,8 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
-
 	"relayforge/internal/execution"
 )
 
@@ -24,31 +22,25 @@ type PoolConfig struct {
 }
 
 type Pool struct {
-	execution *execution.Service
-	executor  execution.Executor
-	projectID uuid.UUID
-	workerID  uuid.UUID
-	config    PoolConfig
-	limiter   *rateLimiter
+	backend  Backend
+	executor execution.Executor
+	config   PoolConfig
+	limiter  *rateLimiter
 
 	activeCtx    context.Context
 	cancelActive context.CancelFunc
 }
 
 func NewPool(
-	executionService *execution.Service,
+	backend Backend,
 	executor execution.Executor,
-	projectID uuid.UUID,
-	workerID uuid.UUID,
 	config PoolConfig,
 ) *Pool {
 	return &Pool{
-		execution: executionService,
-		executor:  executor,
-		projectID: projectID,
-		workerID:  workerID,
-		config:    config,
-		limiter:   newRateLimiter(config.RateLimitPerMin),
+		backend:  backend,
+		executor: executor,
+		config:   config,
+		limiter:  newRateLimiter(config.RateLimitPerMin),
 	}
 }
 
@@ -106,7 +98,7 @@ func (p *Pool) runWorker(ctx context.Context) {
 		}
 
 		claimCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		claim, err := p.execution.Claim(claimCtx, p.projectID, p.workerID)
+		claim, err := p.backend.Claim(claimCtx)
 		cancel()
 
 		if errors.Is(err, execution.ErrNoJobs) {
@@ -150,10 +142,10 @@ func (p *Pool) execute(claim execution.Claim) {
 	defer finishCancel()
 
 	if executeErr == nil {
-		if err := p.execution.Succeed(finishCtx, claim, result); err != nil {
+		if err := p.backend.Succeed(finishCtx, claim, result); err != nil {
 			slog.Error("persist successful execution", "error", err, "job_id", claim.Job.ID)
 			persistErr := fmt.Errorf("persist execution result: %w", err)
-			if _, failErr := p.execution.Fail(finishCtx, claim, persistErr, false); failErr != nil {
+			if _, failErr := p.backend.Fail(finishCtx, claim, persistErr, false); failErr != nil {
 				slog.Error("persist failed execution", "error", failErr, "job_id", claim.Job.ID)
 			}
 			return
@@ -166,7 +158,7 @@ func (p *Pool) execute(claim execution.Claim) {
 		return
 	}
 
-	outcome, err := p.execution.Fail(finishCtx, claim, executeErr, cancelled)
+	outcome, err := p.backend.Fail(finishCtx, claim, executeErr, cancelled)
 	if err != nil {
 		slog.Error("persist failed execution", "error", err, "job_id", claim.Job.ID)
 		return

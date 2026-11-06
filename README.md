@@ -115,7 +115,7 @@ Archived projects are hidden from project and API key operations.
 | `rate_limit_per_minute` | `0` | Maximum job claims started per minute; `0` is unlimited |
 | `default_job_timeout_seconds` | `0` | Per-job execution timeout; `0` uses the worker's `JOB_TIMEOUT` |
 
-Job defaults are applied at submission time. `max_concurrency`, `rate_limit_per_minute`, and `default_job_timeout_seconds` are read when a worker starts, so restart the worker to apply changes to those settings. Retention cleanup runs on `WORKER_CLEANUP_INTERVAL` and re-reads the retention value each run.
+Job defaults are applied at submission time. `max_concurrency`, `rate_limit_per_minute`, and `default_job_timeout_seconds` are read when a worker starts, so restart the worker to apply changes to those settings. Retention cleanup runs in the API on `API_CLEANUP_INTERVAL` (and in direct workers on `WORKER_CLEANUP_INTERVAL`); both re-read the retention value each run.
 
 ### API keys
 
@@ -134,19 +134,22 @@ Workers must authenticate with a project-scoped worker token before registering.
 | --- | --- | --- |
 | `POST` | `/v1/projects/{projectID}/worker-tokens` | Create a worker token (optional `expires_in_days`) |
 | `GET` | `/v1/projects/{projectID}/worker-tokens` | List worker token metadata |
+| `POST` | `/v1/projects/{projectID}/worker-tokens/{tokenID}/rotate` | Issue a replacement token; the old token keeps working for the grace period |
 | `DELETE` | `/v1/projects/{projectID}/worker-tokens/{tokenID}` | Revoke a worker token |
 
-Worker tokens use the `rf_worker_` prefix and are returned only once at creation. They are hashed with HMAC-SHA256 using `WORKER_TOKEN_PEPPER` (falling back to `API_KEY_PEPPER`), track `last_used_at`, and only a short prefix is shown afterward. An authenticated token must belong to the worker's `WORKER_PROJECT_ID`. The API and worker must use the same pepper value.
+Worker tokens use the `rf_worker_` prefix and are returned only once at creation. They are hashed with HMAC-SHA256 using `WORKER_TOKEN_PEPPER` (falling back to `API_KEY_PEPPER`), track `last_used_at`, and only a short prefix is shown afterward. The API and worker must use the same pepper value.
 
-Create a token in the project dashboard or with the API, then start the worker:
+Token rotation returns a new `rf_worker_` token once, records `rotated_at` and `replaced_by_id`, and caps the old token at the rotation grace period (`TOKEN_ROTATION_GRACE`, default 24h). Update the worker's token file or enrollment token before the grace period ends.
+
+Create a token in the project dashboard or with the API, then start the worker. Remote mode is the default when `DATABASE_URL` is not explicitly set:
 
 ```sh
-export WORKER_PROJECT_ID=<project-uuid>
-export WORKER_TOKEN=rf_worker_...
+export WORKER_ENROLLMENT_TOKEN=rf_enroll_...
+export RELAYFORGE_API_URL=https://relayforge.example.com
 make run-worker
 ```
 
-Worker tokens control application-level registration and worker rows. They do not replace database credentials: a worker still needs `DATABASE_URL` access. Use per-worker database roles or network policies for a hard security boundary.
+Worker tokens are application-level auth. In `remote` mode the worker never opens a database connection, so no database credentials are needed on the worker host.
 
 ### Worker pools and enrollment
 
@@ -162,6 +165,7 @@ A worker pool is the database record of a desired worker: its project, name, con
 | `retry_backoff` | `exponential` | `exponential` or `fixed` |
 | `retry_base_delay_seconds` | `0` | Base retry delay; `0` uses `RETRY_BASE_DELAY` |
 | `retry_max_delay_seconds` | `0` | Retry delay ceiling; `0` uses `RETRY_MAX_DELAY` |
+| `allowed_cidrs` | `[]` | IPv4/IPv6 CIDRs allowed to connect; empty allows any address |
 
 Queue selection is enforced in the claim query: a worker only claims jobs whose `queue_name` is in its pool's list. The per-pool retry policy is applied at claim time, so `max_attempts` is written onto the job and retry delays use the pool's backoff settings.
 
@@ -183,7 +187,9 @@ export RELAYFORGE_API_URL=http://localhost:8080
 make run-worker
 ```
 
-The worker exchanges the enrollment token, writes the issued token to `WORKER_TOKEN_FILE` with `0600` permissions, and reuses it on restart. Explicit `WORKER_TOKEN` still takes precedence; a cached token file is next; enrollment is the fallback. To rotate, delete the token file and restart with a fresh enrollment token.
+The worker exchanges the enrollment token, writes the issued token to `WORKER_TOKEN_FILE` with `0600` permissions, and reuses it on restart. Explicit `WORKER_TOKEN` still takes precedence; a cached token file is next; enrollment is the fallback. An invalid cached token is automatically replaced when an enrollment token is also supplied.
+
+Remote workers are the default for supervised pools. The supervisor clears `DATABASE_URL` and sets `WORKER_MODE=remote` on each child process. Direct workers remain available with `WORKER_MODE=direct` and `DATABASE_URL`.
 
 The **supervisor** reads active pools and runs one worker process per pool, restarting workers when policy or configuration changes and stopping them when a pool is paused or deleted:
 
@@ -192,6 +198,35 @@ make run-supervisor
 ```
 
 It issues an enrollment token per spawn, sets `WORKER_PROJECT_ID`/`WORKER_NAME`/`WORKER_CONCURRENCY` from the pool, and stores per-pool cached tokens under `SUPERVISOR_TOKEN_DIR`. See [docs/processing-engine.md](docs/processing-engine.md) for the full flow.
+
+### Remote workers and leases
+
+Remote workers talk only to the API:
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `POST` | `/v1/workers/register` | Register a worker and return the pool/project config |
+| `POST` | `/v1/workers/heartbeat` | Update heartbeat and renew execution leases |
+| `POST` | `/v1/workers/claim` | Claim one job (`204` when no work is available) |
+| `POST` | `/v1/workers/jobs/{jobID}/complete` | Record success with a JSON result |
+| `POST` | `/v1/workers/jobs/{jobID}/fail` | Record failure and apply the pool retry policy |
+| `POST` | `/v1/workers/offline` | Mark the worker offline during shutdown |
+
+Every claim records a lease of `job_timeout + WORKER_LEASE_GRACE`. Heartbeats renew leases for running jobs. If a worker disappears, the API lease reaper fails the execution with `worker lease expired` and retries the job under the pool policy until attempts are exhausted. Completions and failures are idempotent by execution ID, so a retried HTTP call cannot double-apply. Workers whose last heartbeat is older than `WORKER_STALE_AFTER` are marked offline.
+
+The API also owns the outbox dispatcher (`API_OUTBOX_INTERVAL`) and retention cleanup (`API_CLEANUP_INTERVAL`) so remote workers do not need PostgreSQL.
+
+### Worker visibility and security
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `GET` | `/v1/projects/{projectID}/workers` | List workers with status, mode, heartbeat, and running jobs |
+| `GET` | `/v1/projects/{projectID}/worker-pools/{poolID}/workers` | List workers for one pool |
+| `GET` | `/v1/projects/{projectID}/worker-pools/stats` | Online/offline workers, running jobs, queue depth, throughput, success rate |
+
+Pool `allowed_cidrs` are enforced on register, claim, heartbeat, and completion. Set `TRUST_PROXY_HEADERS=true` only behind a trusted reverse proxy so `X-Forwarded-For`/`X-Real-IP` can be used for the client address. Set `WORKER_MTLS_HEADER` to a header injected by a trusted proxy (for example `X-Client-Cert-Fingerprint`) to require a client certificate identity. mTLS itself terminates at the proxy/ingress.
+
+Workers can load pool-local secrets from `WORKER_SECRETS_FILE` (a JSON object of environment variable names to values) and restrict outbound HTTP for handlers that use `execution.NewAllowlistedClient` via `WORKER_EGRESS_ALLOWLIST` (comma-separated hosts, exact or `*.example.com`). Secrets and egress rules stay on the worker host.
 
 API keys use the `rf_live_` prefix and are returned only once at creation. Keys are hashed at rest with HMAC-SHA256 using `API_KEY_PEPPER`, and the dashboard shows only a short `key_prefix`. Key creation accepts an optional `expires_in_days` (1–3650); omitted keys never expire. `last_used_at` is updated at most once per minute during authentication.
 
@@ -237,7 +272,7 @@ Set a limit to `0` to disable it. These counters are per API process; running mu
 
 ### Processing engine
 
-The worker resolves credentials in this order: explicit `WORKER_TOKEN`, a cached token file at `WORKER_TOKEN_FILE`, then `WORKER_ENROLLMENT_TOKEN` (which enrolls against `RELAYFORGE_API_URL`). If the token belongs to a worker pool, the pool's concurrency and name override the env defaults.
+The worker resolves credentials in this order: explicit `WORKER_TOKEN`, a cached token file at `WORKER_TOKEN_FILE`, then `WORKER_ENROLLMENT_TOKEN` (which enrolls against `RELAYFORGE_API_URL`). If the token belongs to a worker pool, the pool's concurrency, name, queues, timeout, and retry policy override the env defaults. `WORKER_MODE` selects `direct` (PostgreSQL) or `remote` (API only); when unset, an explicit `DATABASE_URL` selects direct and otherwise remote is used.
 
 ```sh
 export WORKER_PROJECT_ID=<project-uuid>

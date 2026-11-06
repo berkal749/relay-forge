@@ -13,7 +13,7 @@ RelayForge is a PostgreSQL-backed background job / task queue service with four 
 
 Stack: Go 1.26, PostgreSQL 17, pgx/v5, sqlc, golang-migrate, React 19, TypeScript, TanStack Query, pnpm.
 
-> Repo status: history begins with the initial scaffold commit. Inspect `git log` rather than assuming earlier history. The latest schema migration is `000009_worker_pool_policies`.
+> Repo status: history begins with the initial scaffold commit. Inspect `git log` rather than assuming earlier history. The latest schema migration is `000010_remote_workers`.
 
 ## Prerequisites
 
@@ -151,18 +151,22 @@ Important invariants:
 - Claiming filters on the pool's queue list and applies the pool's `max_attempts` override to the job in the same transaction. Pool retry policy controls the backoff when an attempt fails.
 - Enrollment tokens are single-use, default to a 15-minute TTL, and are consumed atomically via `ConsumeEnrollmentToken`. Redeeming one issues a `worker` token bound to the same pool.
 - A worker token bound to a paused pool, a revoked/expired token, or an archived project cannot authenticate.
+- Remote workers authenticate with the same token but never connect to PostgreSQL. Claims create an execution with `lease_expires_at`; heartbeats renew leases; the API reaper fails expired executions with `worker lease expired`.
+- Token rotation creates a replacement token, records `rotated_at`/`replaced_by_id`, and caps the old token at `TOKEN_ROTATION_GRACE` (default 24h).
+- `worker_pools.allowed_cidrs` is enforced on remote register/claim/heartbeat/complete. `TRUST_PROXY_HEADERS` and `WORKER_MTLS_HEADER` provide proxy-based identity controls.
 
 ### Worker processing flow
 
-0. Credentials resolve as `WORKER_TOKEN` → `WORKER_TOKEN_FILE` → `WORKER_ENROLLMENT_TOKEN` (`POST /v1/workers/enroll`, then cache). Pool membership overrides concurrency, name, queues, job timeout, and retry policy. The token is authenticated before `worker.Register`; the pool must be active.
-1. Outbox dispatcher polls every second, claims pending messages with `FOR UPDATE SKIP LOCKED`, calls `pg_notify('relayforge_jobs', job_id)`, and marks messages processed in the same transaction.
-2. Each pool goroutine calls `execution.Service.Claim`; claimability requires matching project, `pending`/`scheduled`, `scheduled_at <= now()`, an attempt below the pool override (or the job's `max_attempts`), a queue in the pool's `queue_names`, and a processed outbox message. The claim writes the pool's `max_attempts` override onto the job.
+0. `WORKER_MODE` selects `direct` (PostgreSQL) or `remote` (API only). When unset, an explicit `DATABASE_URL` selects direct and otherwise remote. Credentials resolve as `WORKER_TOKEN` → `WORKER_TOKEN_FILE` → `WORKER_ENROLLMENT_TOKEN` (`POST /v1/workers/enroll`, then cache). Pool membership overrides concurrency, name, queues, job timeout, and retry policy.
+1. The API outbox dispatcher polls on `API_OUTBOX_INTERVAL`, claims pending messages with `FOR UPDATE SKIP LOCKED`, calls `pg_notify('relayforge_jobs', job_id)`, and marks messages processed in the same transaction. Direct workers also run a dispatcher.
+2. Each pool goroutine calls its `Backend.Claim`; direct mode uses `execution.Service.Claim`, remote mode calls `POST /v1/workers/claim`. Claimability requires matching project, `pending`/`scheduled`, `scheduled_at <= now()`, an attempt below the pool override (or the job's `max_attempts`), a queue in the pool's `queue_names`, and a processed outbox message. The claim writes the pool's `max_attempts` override onto the job and records a lease.
 3. Handler runs under the pool's `job_timeout_seconds`, then the project default, then `JOB_TIMEOUT`.
 4. Failure retries use the pool's `retry_backoff` (fixed or exponential) with its base/max delays (falling back to `RETRY_BASE_DELAY`/`RETRY_MAX_DELAY`); exhausted attempts become terminal `failed`.
 5. Project `max_concurrency` caps the pool, `rate_limit_per_minute` throttles claims in fixed one-minute windows, and `default_job_timeout_seconds` is the project-level timeout fallback. These are read at worker startup.
-6. `worker.RunCleanup` periodically purges terminal jobs past `job_retention_days` (re-read each tick; `0` disables).
+6. The API purges terminal jobs past `job_retention_days` on `API_CLEANUP_INTERVAL`; direct workers also run cleanup on `WORKER_CLEANUP_INTERVAL`. `0` disables cleanup.
+6a. The API reaper fails executions whose lease elapsed and retries them under the pool policy. Completions/failures are idempotent by execution ID; stale workers are swept offline on `API_WORKER_SWEEP_INTERVAL`.
 7. Shutdown stops claiming, drains up to `WORKER_SHUTDOWN_TIMEOUT`, cancels remaining handlers, records cancelled executions, marks the worker offline.
-8. The **supervisor** reconciles `worker_pools` every `SUPERVISOR_POLL_INTERVAL`: it issues an enrollment token, spawns one `relayforge-worker` per active pool, restarts on name/concurrency/queue/timeout/retry changes, and stops workers when a pool is paused/deleted.
+8. The **supervisor** reconciles `worker_pools` every `SUPERVISOR_POLL_INTERVAL`: it issues an enrollment token, spawns one remote `relayforge-worker` per active pool (clearing `DATABASE_URL`), restarts on name/concurrency/queue/timeout/retry changes, and stops workers when a pool is paused/deleted.
 9. Note: the `pg_notify` message is currently **not consumed** by `LISTEN`; workers poll. Treat notifications as forward-looking.
 
 Built-in handler types: `echo`, `noop`, `sleep` (payload `{"duration_ms": N}`). Register real handlers in `cmd/worker/main.go`:
@@ -186,7 +190,7 @@ registry.Register("send_email", sendEmailHandler)
 - Use `slog` for logging; do not add a logging framework.
 - HTTP rate limiting lives in `internal/middleware/ratelimit.go`. Limits are in-memory fixed windows keyed by IP, session user, or API key; they are per process, so multi-instance deployments need a shared store.
 - Secret-bearing responses (login, API key creation, worker token and enrollment token creation) must set `Cache-Control: no-store`. Raw credentials are only returned once, at creation.
-- Worker credentials are managed in `internal/workertoken`; enrollment is resolved in `internal/worker/credentials.go`; `internal/supervisor` reconciles pools. This is app-level auth; workers still use `DATABASE_URL` directly.
+- Worker credentials are managed in `internal/workertoken`; enrollment is resolved in `internal/worker/credentials.go`; remote identity and HTTP transport live in `internal/worker/remote.go`; `internal/supervisor` reconciles pools. Remote workers are API-only; direct workers use `DATABASE_URL`.
 - `cmd/supervisor` spawns the binary at `SUPERVISOR_WORKER_BINARY` (default `relayforge-worker`) and passes pool config through the environment. Cached tokens live under `SUPERVISOR_TOKEN_DIR` with `0600` permissions.
 
 ### Database / sqlc
@@ -200,7 +204,7 @@ registry.Register("send_email", sendEmailHandler)
 
 - API calls belong in `web/src/lib/api.ts`; add types alongside existing exported types.
 - Data fetching/mutations use TanStack Query; UI primitives live in `web/src/components/ui` (shadcn/base-ui).
-- The project page composes settings plus `api-key-panel`, `worker-pool-panel`, and `worker-token-panel`; keep new project-scoped admin UI as a panel component.
+- The project page composes settings plus `api-key-panel`, `worker-fleet-panel`, `worker-pool-panel`, and `worker-token-panel`; keep new project-scoped admin UI as a panel component.
 - Path alias `@/` maps to `web/src`.
 - Job status polling refreshes every 2s while active (see `pages/job.tsx` / `components/job-table.tsx`).
 - Styling is Tailwind v4 + `cn()` helper; keep components consistent with existing ones.
@@ -210,7 +214,7 @@ registry.Register("send_email", sendEmailHandler)
 
 - `make test` / `go test ./...` is the baseline. Unit tests cover auth validation, API key hashing, worker tokens/enrollment helpers, worker pools, job defaults/idempotency, backoff/status, project settings, the worker limiter, and HTTP rate limiting.
 - Tests live in `internal/<domain>/*_test.go` and are table-driven where practical.
-- There are still no HTTP handler or database integration tests. Keep new unit tests free of external dependencies; integration tests should be isolated and clearly marked.
+- Remote protocol, CIDR, egress-allowlist, and worker-credential helpers have unit tests. There are still no database integration tests. Keep new unit tests free of external dependencies; integration tests should be isolated and clearly marked.
 - Run `make web-lint` and `make web-build` after frontend changes.
 
 ## Roadmap / known gaps
@@ -228,11 +232,12 @@ Other known gaps:
 - No job cancellation endpoint even though the status model and docs support `cancelled`; `UpdateJobStatus` is unused.
 - No `LISTEN` consumer for `relayforge_jobs`; the worker relies on polling.
 - `outbox_messages` has a `failed` status but no retry/dead-letter handling.
-- Worker is single-project per process; the supervisor runs one process per active pool. There is no replicas-per-pool field or autoscaling.
+- Worker is single-project per process; the supervisor runs one process per active pool. There is no replicas-per-pool field, multi-project host, or autoscaling.
 - No per-queue concurrency or job priority feedback beyond SQL ordering.
 - API and worker rate limiting are per process; multi-instance deployments need a shared store.
-- API key and worker token scopes/rotation endpoints are not implemented (expiry, revocation, last-used tracking, and enrollment-based rotation are).
-- Worker token auth is application-level; it does not restrict direct database access.
+- API key rotation and worker token scopes are not implemented (worker token expiry, revocation, last-used tracking, rotation with grace, and enrollment-based rotation are).
+- Remote workers no longer need database access. Direct mode still uses a database role; worker token auth is application-level and does not restrict that role.
+- Token rotation is manual; workers reload the new token on restart (or when the cached token file is replaced). There is no push-based config or token delivery.
 
 ## Before finishing a task
 

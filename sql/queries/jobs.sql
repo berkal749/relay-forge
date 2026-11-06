@@ -99,3 +99,11 @@ DELETE FROM jobs
 WHERE project_id = sqlc.arg('project_id')
   AND status IN ('succeeded', 'failed', 'cancelled')
   AND updated_at < now() - make_interval(days => sqlc.arg('retention_days')::int);
+
+-- name: DeleteExpiredJobsAllProjects :execrows
+DELETE FROM jobs
+USING projects
+WHERE jobs.project_id = projects.id
+  AND projects.job_retention_days > 0
+  AND jobs.status IN ('succeeded', 'failed', 'cancelled')
+  AND jobs.updated_at < now() - make_interval(days => projects.job_retention_days);

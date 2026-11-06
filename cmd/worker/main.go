@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -34,47 +35,49 @@ func run() error {
 		return err
 	}
 
-	if cfg.WorkerProjectID == "" && cfg.WorkerToken != "" {
-		return fmt.Errorf("WORKER_PROJECT_ID is required")
-	}
-
-	connectCtx, cancelConnect := context.WithTimeout(context.Background(), cfg.DatabaseConnectTimeout)
-	defer cancelConnect()
-
-	pool, err := database.Connect(connectCtx, cfg.DatabaseURL)
-	if err != nil {
+	if err := worker.LoadSecretsFile(cfg.WorkerSecretsFile); err != nil {
 		return err
 	}
-	defer pool.Close()
 
-	queries := db.New(pool)
-	registerCtx, cancelRegister := context.WithTimeout(context.Background(), 10*time.Second)
-	tokenService := workertoken.NewService(queries, nil, cfg.WorkerTokenPepper)
-	credentials, err := worker.ResolveCredentials(registerCtx, queries, tokenService, worker.CredentialOptions{
-		ProjectID:       cfg.WorkerProjectID,
+	if cfg.WorkerMode == "remote" {
+		return runRemote(cfg)
+	}
+	return runDirect(cfg)
+}
+
+func runRemote(cfg config.Config) error {
+	registerCtx, cancelRegister := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancelRegister()
+
+	workerNameOption := ""
+	if os.Getenv("WORKER_NAME") != "" {
+		workerNameOption = cfg.WorkerName
+	}
+	identity, err := worker.ResolveRemoteIdentity(registerCtx, worker.CredentialOptions{
 		Token:           cfg.WorkerToken,
 		TokenFile:       cfg.WorkerTokenFile,
 		EnrollmentToken: cfg.WorkerEnrollmentToken,
 		APIBaseURL:      cfg.APIBaseURL,
+		WorkerName:      workerNameOption,
 	})
 	if err != nil {
-		cancelRegister()
-		return fmt.Errorf("resolve worker credentials: %w", err)
+		return fmt.Errorf("resolve remote worker identity: %w", err)
 	}
 
-	projectID := credentials.ProjectID
+	remote := identity.Config
 	workerName := cfg.WorkerName
 	concurrency := cfg.WorkerConcurrency
 	jobTimeout := cfg.WorkerJobTimeout
+	queueNames := []string(nil)
+	maxAttemptsOverride := int32(0)
 	retryPolicy := execution.RetryPolicy{
 		Backoff: execution.BackoffExponential,
 		Base:    cfg.RetryBaseDelay,
 		Max:     cfg.RetryMaxDelay,
 	}
-	var queueNames []string
-	var maxAttemptsOverride int32
-	if credentials.Pool != nil {
-		pool := credentials.Pool
+
+	if remote.WorkerPool != nil {
+		pool := remote.WorkerPool
 		workerName = pool.Name
 		concurrency = int(pool.Concurrency)
 		queueNames = pool.QueueNames
@@ -96,13 +99,100 @@ func run() error {
 		}
 	}
 
-	workerRecord, err := worker.Register(registerCtx, queries, projectID, credentials.Token.ID, credentials.Token.PoolID, workerName)
+	if remote.Project.MaxConcurrency > 0 && int(remote.Project.MaxConcurrency) < concurrency {
+		concurrency = int(remote.Project.MaxConcurrency)
+	}
+	if remote.Project.DefaultJobTimeoutSeconds > 0 && (remote.WorkerPool == nil || remote.WorkerPool.JobTimeoutSeconds == 0) {
+		jobTimeout = time.Duration(remote.Project.DefaultJobTimeoutSeconds) * time.Second
+	}
+
+	backend := worker.NewRemoteBackend(cfg.APIBaseURL, identity.Token, remote.WorkerID, nil)
+	slog.Info("remote worker started",
+		"worker_id", remote.WorkerID,
+		"project_id", remote.ProjectID,
+		"name", workerName,
+		"api_url", cfg.APIBaseURL,
+		"concurrency", concurrency,
+		"job_timeout", jobTimeout,
+		"queue_names", queueNames,
+		"max_attempts_override", maxAttemptsOverride,
+		"retry_backoff", retryPolicy.Backoff,
+		"rate_limit_per_minute", remote.Project.RateLimitPerMinute,
+	)
+
+	return runPool(cfg, backend, concurrency, jobTimeout, int(remote.Project.RateLimitPerMinute))
+}
+
+func runDirect(cfg config.Config) error {
+	if cfg.WorkerProjectID == "" && cfg.WorkerToken != "" {
+		return fmt.Errorf("WORKER_PROJECT_ID is required")
+	}
+
+	connectCtx, cancelConnect := context.WithTimeout(context.Background(), cfg.DatabaseConnectTimeout)
+	defer cancelConnect()
+
+	pool, err := database.Connect(connectCtx, cfg.DatabaseURL)
 	if err != nil {
-		cancelRegister()
+		return err
+	}
+	defer pool.Close()
+
+	queries := db.New(pool)
+	registerCtx, cancelRegister := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelRegister()
+
+	tokenService := workertoken.NewService(queries, nil, cfg.WorkerTokenPepper)
+	credentials, err := worker.ResolveCredentials(registerCtx, queries, tokenService, worker.CredentialOptions{
+		ProjectID:       cfg.WorkerProjectID,
+		Token:           cfg.WorkerToken,
+		TokenFile:       cfg.WorkerTokenFile,
+		EnrollmentToken: cfg.WorkerEnrollmentToken,
+		APIBaseURL:      cfg.APIBaseURL,
+		WorkerName:      cfg.WorkerName,
+	})
+	if err != nil {
+		return fmt.Errorf("resolve worker credentials: %w", err)
+	}
+
+	projectID := credentials.ProjectID
+	workerName := cfg.WorkerName
+	concurrency := cfg.WorkerConcurrency
+	jobTimeout := cfg.WorkerJobTimeout
+	retryPolicy := execution.RetryPolicy{
+		Backoff: execution.BackoffExponential,
+		Base:    cfg.RetryBaseDelay,
+		Max:     cfg.RetryMaxDelay,
+	}
+	var queueNames []string
+	var maxAttemptsOverride int32
+	if credentials.Pool != nil {
+		configured := credentials.Pool
+		workerName = configured.Name
+		concurrency = int(configured.Concurrency)
+		queueNames = configured.QueueNames
+		maxAttemptsOverride = configured.MaxAttempts
+		if configured.JobTimeoutSeconds > 0 {
+			jobTimeout = time.Duration(configured.JobTimeoutSeconds) * time.Second
+		}
+		if configured.RetryBackoff != "" {
+			retryPolicy.Backoff = configured.RetryBackoff
+		}
+		if configured.RetryBaseDelaySeconds > 0 {
+			retryPolicy.Base = time.Duration(configured.RetryBaseDelaySeconds) * time.Second
+		}
+		if configured.RetryMaxDelaySeconds > 0 {
+			retryPolicy.Max = time.Duration(configured.RetryMaxDelaySeconds) * time.Second
+		}
+		if retryPolicy.Max < retryPolicy.Base {
+			retryPolicy.Max = retryPolicy.Base
+		}
+	}
+
+	workerRecord, err := worker.Register(registerCtx, queries, projectID, credentials.Token.ID, credentials.Token.PoolID, workerName, "direct")
+	if err != nil {
 		return err
 	}
 	projectRecord, err := queries.GetProject(registerCtx, projectID)
-	cancelRegister()
 	if err != nil {
 		return fmt.Errorf("load project settings: %w", err)
 	}
@@ -114,13 +204,17 @@ func run() error {
 		jobTimeout = time.Duration(projectRecord.DefaultJobTimeoutSeconds) * time.Second
 	}
 
+	lease := jobTimeout + cfg.WorkerLeaseGrace
+	executionService := execution.NewService(pool, retryPolicy, queueNames, maxAttemptsOverride, lease)
+	backend := worker.NewDirectBackend(executionService, queries, projectID, workerRecord.ID, lease)
+
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	defer cancelRun()
 
 	signalCtx, stop := signal.NotifyContext(runCtx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	go worker.RunHeartbeat(signalCtx, queries, workerRecord.ID, cfg.WorkerHeartbeatInterval)
+	go worker.RunHeartbeat(signalCtx, backend, cfg.WorkerHeartbeatInterval)
 	go worker.RunCleanup(signalCtx, queries, projectID, cfg.WorkerCleanupInterval)
 
 	dispatcher := outbox.NewDispatcher(pool, outbox.PostgresNotifier{})
@@ -131,29 +225,10 @@ func run() error {
 		runOutbox(signalCtx, dispatcher)
 	}()
 
-	registry := execution.NewRegistry()
-	registry.Register("echo", execution.Echo)
-	registry.Register("noop", execution.Noop)
-	registry.Register("sleep", execution.Sleep)
-
-	executionService := execution.NewService(pool, retryPolicy, queueNames, maxAttemptsOverride)
-	poolRunner := worker.NewPool(
-		executionService,
-		registry,
-		projectID,
-		workerRecord.ID,
-		worker.PoolConfig{
-			Concurrency:     concurrency,
-			PollInterval:    cfg.WorkerPollInterval,
-			JobTimeout:      jobTimeout,
-			ShutdownTimeout: cfg.WorkerShutdownTimeout,
-			RateLimitPerMin: int(projectRecord.RateLimitPerMinute),
-		},
-	)
-
 	slog.Info("worker started",
 		"worker_id", workerRecord.ID,
 		"project_id", projectID,
+		"mode", "direct",
 		"concurrency", concurrency,
 		"job_timeout", jobTimeout,
 		"rate_limit_per_minute", projectRecord.RateLimitPerMinute,
@@ -164,17 +239,54 @@ func run() error {
 		"retry_max_delay", retryPolicy.Max,
 	)
 
-	runErr := poolRunner.Run(signalCtx)
+	runErr := runPoolWithContext(signalCtx, cfg, backend, concurrency, jobTimeout, int(projectRecord.RateLimitPerMinute))
 	cancelRun()
 	outboxWorkers.Wait()
 
 	offlineCtx, cancelOffline := context.WithTimeout(context.Background(), 10*time.Second)
-	if err := worker.MarkOffline(offlineCtx, queries, workerRecord.ID); err != nil {
+	if err := backend.Offline(offlineCtx); err != nil {
 		slog.Error("mark worker offline", "error", err)
 	}
 	cancelOffline()
 
 	return runErr
+}
+
+func runPool(cfg config.Config, backend worker.Backend, concurrency int, jobTimeout time.Duration, rateLimit int) error {
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+
+	signalCtx, stop := signal.NotifyContext(runCtx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	go worker.RunHeartbeat(signalCtx, backend, cfg.WorkerHeartbeatInterval)
+
+	runErr := runPoolWithContext(signalCtx, cfg, backend, concurrency, jobTimeout, rateLimit)
+	cancelRun()
+
+	offlineCtx, cancelOffline := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := backend.Offline(offlineCtx); err != nil && !errors.Is(err, context.Canceled) {
+		slog.Error("mark worker offline", "error", err)
+	}
+	cancelOffline()
+
+	return runErr
+}
+
+func runPoolWithContext(ctx context.Context, cfg config.Config, backend worker.Backend, concurrency int, jobTimeout time.Duration, rateLimit int) error {
+	registry := execution.NewRegistry()
+	registry.Register("echo", execution.Echo)
+	registry.Register("noop", execution.Noop)
+	registry.Register("sleep", execution.Sleep)
+
+	poolRunner := worker.NewPool(backend, registry, worker.PoolConfig{
+		Concurrency:     concurrency,
+		PollInterval:    cfg.WorkerPollInterval,
+		JobTimeout:      jobTimeout,
+		ShutdownTimeout: cfg.WorkerShutdownTimeout,
+		RateLimitPerMin: rateLimit,
+	})
+	return poolRunner.Run(ctx)
 }
 
 func runOutbox(ctx context.Context, dispatcher *outbox.Dispatcher) {

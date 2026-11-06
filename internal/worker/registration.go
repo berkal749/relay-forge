@@ -3,16 +3,14 @@ package worker
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 
 	"relayforge/internal/database/db"
 )
 
-func Register(ctx context.Context, queries *db.Queries, projectID, tokenID uuid.UUID, poolID *uuid.UUID, name string) (db.Worker, error) {
+func Register(ctx context.Context, queries *db.Queries, projectID, tokenID uuid.UUID, poolID *uuid.UUID, name, mode string) (db.Worker, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return db.Worker{}, fmt.Errorf("worker name cannot be empty")
@@ -24,6 +22,7 @@ func Register(ctx context.Context, queries *db.Queries, projectID, tokenID uuid.
 		WorkerPoolID:  poolID,
 		Name:          name,
 		Status:        "online",
+		Mode:          mode,
 	})
 	if err != nil {
 		return db.Worker{}, fmt.Errorf("register worker: %w", err)
@@ -43,25 +42,4 @@ func MarkOffline(ctx context.Context, queries *db.Queries, workerID uuid.UUID) e
 		return fmt.Errorf("mark worker offline: %w", err)
 	}
 	return nil
-}
-
-func RunHeartbeat(ctx context.Context, queries *db.Queries, workerID uuid.UUID, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	record := func() {
-		if err := Heartbeat(ctx, queries, workerID); err != nil && ctx.Err() == nil {
-			slog.Error("worker heartbeat failed", "error", err)
-		}
-	}
-
-	record()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			record()
-		}
-	}
 }

@@ -27,6 +27,8 @@ const (
 	maxNameLength     = 100
 	maxExpiryDays     = 3650
 	maxEnrollmentTTL  = 24 * time.Hour
+	minRotationGrace  = time.Hour
+	maxRotationGrace  = 30 * 24 * time.Hour
 )
 
 var (
@@ -35,6 +37,7 @@ var (
 	ErrInvalidTTL    = errors.New("enrollment token lifetime must be between 1 minute and 24 hours")
 	ErrInvalidToken  = errors.New("invalid worker token")
 	ErrTokenNotFound = errors.New("worker token not found")
+	ErrInvalidGrace  = errors.New("token rotation grace must be between 1 hour and 30 days")
 )
 
 type Service struct {
@@ -158,6 +161,73 @@ func (s *Service) Authenticate(ctx context.Context, projectID uuid.UUID, rawToke
 	}
 
 	return token, nil
+}
+
+// AuthenticateAny validates a raw worker token without requiring the caller to
+// know its project first. Remote workers present only the token; the token
+// itself resolves the project and pool.
+func (s *Service) AuthenticateAny(ctx context.Context, rawToken string) (db.WorkerToken, error) {
+	if rawToken == "" || !strings.HasPrefix(rawToken, Prefix) {
+		return db.WorkerToken{}, ErrInvalidToken
+	}
+
+	token, err := s.queries.GetWorkerTokenByHash(ctx, secret.HMAC(s.pepper, rawToken))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return db.WorkerToken{}, ErrInvalidToken
+	}
+	if err != nil {
+		return db.WorkerToken{}, fmt.Errorf("get worker token: %w", err)
+	}
+
+	if err := s.queries.TouchWorkerToken(ctx, token.ID); err != nil && ctx.Err() == nil {
+		slog.Warn("update worker token last used", "error", err, "token_id", token.ID)
+	}
+	return token, nil
+}
+
+// Rotate issues a replacement token and shortens the old token's validity to a
+// grace window so an in-flight worker can pick up the replacement.
+func (s *Service) Rotate(ctx context.Context, userID, projectID, tokenID uuid.UUID, grace time.Duration) (CreatedToken, error) {
+	if grace < minRotationGrace || grace > maxRotationGrace {
+		return CreatedToken{}, ErrInvalidGrace
+	}
+	if _, err := s.projects.GetOwned(ctx, userID, projectID); err != nil {
+		return CreatedToken{}, err
+	}
+
+	old, err := s.queries.GetWorkerTokenForProject(ctx, db.GetWorkerTokenForProjectParams{
+		ID:        tokenID,
+		ProjectID: projectID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return CreatedToken{}, ErrTokenNotFound
+	}
+	if err != nil {
+		return CreatedToken{}, fmt.Errorf("get worker token: %w", err)
+	}
+	if old.RevokedAt != nil {
+		return CreatedToken{}, ErrTokenNotFound
+	}
+
+	created, err := s.create(ctx, projectID, old.PoolID, "worker", old.Name+" (rotated)", nil)
+	if err != nil {
+		return CreatedToken{}, err
+	}
+
+	if _, err := s.queries.RotateWorkerToken(ctx, db.RotateWorkerTokenParams{
+		ID:           old.ID,
+		ProjectID:    projectID,
+		ReplacedByID: &created.Token.ID,
+		GraceSeconds: int32(grace / time.Second),
+	}); err != nil {
+		_, _ = s.queries.RevokeWorkerToken(ctx, db.RevokeWorkerTokenParams{ID: created.Token.ID, ProjectID: projectID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return CreatedToken{}, ErrTokenNotFound
+		}
+		return CreatedToken{}, fmt.Errorf("rotate worker token: %w", err)
+	}
+
+	return created, nil
 }
 
 // Enroll redeems a single-use enrollment token for a pool-scoped worker token.

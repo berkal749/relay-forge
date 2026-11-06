@@ -130,6 +130,8 @@ func (s *Supervisor) startLocked(ctx context.Context, pool db.WorkerPool) error 
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
 	command.Env = mergeEnv(os.Environ(), map[string]string{
+		"DATABASE_URL":            "",
+		"WORKER_MODE":             "remote",
 		"WORKER_TOKEN":            "",
 		"WORKER_ENROLLMENT_TOKEN": enrollment.RawToken,
 		"WORKER_TOKEN_FILE":       tokenFile,

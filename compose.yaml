@@ -31,6 +31,15 @@ services:
       RATE_LIMIT_AUTH_PER_MINUTE: ${RATE_LIMIT_AUTH_PER_MINUTE:-20}
       RATE_LIMIT_API_PER_MINUTE: ${RATE_LIMIT_API_PER_MINUTE:-600}
       RATE_LIMIT_JOB_SUBMIT_PER_MINUTE: ${RATE_LIMIT_JOB_SUBMIT_PER_MINUTE:-120}
+      API_OUTBOX_INTERVAL: ${API_OUTBOX_INTERVAL:-1s}
+      API_CLEANUP_INTERVAL: ${API_CLEANUP_INTERVAL:-1h}
+      API_REAPER_INTERVAL: ${API_REAPER_INTERVAL:-15s}
+      API_WORKER_SWEEP_INTERVAL: ${API_WORKER_SWEEP_INTERVAL:-30s}
+      WORKER_LEASE_GRACE: ${WORKER_LEASE_GRACE:-60s}
+      WORKER_STALE_AFTER: ${WORKER_STALE_AFTER:-90s}
+      TOKEN_ROTATION_GRACE: ${TOKEN_ROTATION_GRACE:-24h}
+      TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-false}
+      WORKER_MTLS_HEADER: ${WORKER_MTLS_HEADER:-}
     ports:
       - "${API_PORT:-8080}:8080"
     healthcheck:
@@ -50,9 +59,7 @@ services:
     profiles: ["worker"]
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER:-relayforge}:${POSTGRES_PASSWORD:-relayforge}@postgres:5432/${POSTGRES_DB:-relayforge}?sslmode=disable
-      API_KEY_PEPPER: ${API_KEY_PEPPER:-relayforge-development-pepper}
-      WORKER_TOKEN_PEPPER: ${WORKER_TOKEN_PEPPER:-}
+      WORKER_MODE: remote
       WORKER_PROJECT_ID: ${WORKER_PROJECT_ID:-}
       WORKER_TOKEN: ${WORKER_TOKEN:-}
       WORKER_TOKEN_FILE: ${WORKER_TOKEN_FILE:-/var/lib/relayforge/worker-token.json}
@@ -64,13 +71,14 @@ services:
       JOB_TIMEOUT: ${JOB_TIMEOUT:-5m}
       WORKER_SHUTDOWN_TIMEOUT: ${WORKER_SHUTDOWN_TIMEOUT:-30s}
       WORKER_HEARTBEAT_INTERVAL: ${WORKER_HEARTBEAT_INTERVAL:-15s}
-      WORKER_CLEANUP_INTERVAL: ${WORKER_CLEANUP_INTERVAL:-1h}
       RETRY_BASE_DELAY: ${RETRY_BASE_DELAY:-5s}
       RETRY_MAX_DELAY: ${RETRY_MAX_DELAY:-5m}
+      WORKER_SECRETS_FILE: ${WORKER_SECRETS_FILE:-}
+      WORKER_EGRESS_ALLOWLIST: ${WORKER_EGRESS_ALLOWLIST:-}
     volumes:
       - worker_state:/var/lib/relayforge
     depends_on:
-      postgres:
+      api:
         condition: service_healthy
 
   supervisor:

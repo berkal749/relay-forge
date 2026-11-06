@@ -9,16 +9,18 @@ import (
 )
 
 type Dependencies struct {
-	Auth                *handlers.AuthHandler
-	Projects            *handlers.ProjectHandler
-	APIKeys             *handlers.APIKeyHandler
-	WorkerTokens        *handlers.WorkerTokenHandler
-	WorkerPools         *handlers.WorkerPoolHandler
-	Enrollment          *handlers.EnrollmentHandler
-	Jobs                *handlers.JobHandler
-	Authenticator       middleware.Authenticator
-	APIKeyAuthenticator middleware.APIKeyAuthenticator
-	RateLimits          middleware.RateLimiters
+	Auth                     *handlers.AuthHandler
+	Projects                 *handlers.ProjectHandler
+	APIKeys                  *handlers.APIKeyHandler
+	WorkerTokens             *handlers.WorkerTokenHandler
+	WorkerPools              *handlers.WorkerPoolHandler
+	Enrollment               *handlers.EnrollmentHandler
+	WorkerRemote             *handlers.WorkerRemoteHandler
+	Jobs                     *handlers.JobHandler
+	Authenticator            middleware.Authenticator
+	APIKeyAuthenticator      middleware.APIKeyAuthenticator
+	WorkerTokenAuthenticator middleware.WorkerTokenAuthenticator
+	RateLimits               middleware.RateLimiters
 }
 
 func New(deps Dependencies) http.Handler {
@@ -54,16 +56,29 @@ func New(deps Dependencies) http.Handler {
 	mux.Handle("DELETE /v1/projects/{projectID}/api-keys/{keyID}", requireSession(limitSession(http.HandlerFunc(deps.APIKeys.Revoke))))
 
 	mux.Handle("POST /v1/projects/{projectID}/worker-tokens", requireSession(limitSession(http.HandlerFunc(deps.WorkerTokens.Create))))
+	mux.Handle("POST /v1/projects/{projectID}/worker-tokens/{tokenID}/rotate", requireSession(limitSession(http.HandlerFunc(deps.WorkerTokens.Rotate))))
 	mux.Handle("GET /v1/projects/{projectID}/worker-tokens", requireSession(limitSession(http.HandlerFunc(deps.WorkerTokens.List))))
 	mux.Handle("DELETE /v1/projects/{projectID}/worker-tokens/{tokenID}", requireSession(limitSession(http.HandlerFunc(deps.WorkerTokens.Revoke))))
 
 	mux.Handle("POST /v1/projects/{projectID}/worker-pools", requireSession(limitSession(http.HandlerFunc(deps.WorkerPools.Create))))
 	mux.Handle("GET /v1/projects/{projectID}/worker-pools", requireSession(limitSession(http.HandlerFunc(deps.WorkerPools.List))))
+	mux.Handle("GET /v1/projects/{projectID}/worker-pools/stats", requireSession(limitSession(http.HandlerFunc(deps.WorkerPools.Stats))))
 	mux.Handle("PATCH /v1/projects/{projectID}/worker-pools/{poolID}", requireSession(limitSession(http.HandlerFunc(deps.WorkerPools.Update))))
 	mux.Handle("DELETE /v1/projects/{projectID}/worker-pools/{poolID}", requireSession(limitSession(http.HandlerFunc(deps.WorkerPools.Delete))))
 	mux.Handle("POST /v1/projects/{projectID}/worker-pools/{poolID}/enrollment-tokens", requireSession(limitSession(http.HandlerFunc(deps.WorkerPools.CreateEnrollmentToken))))
 
+	mux.Handle("GET /v1/projects/{projectID}/workers", requireSession(limitSession(http.HandlerFunc(deps.WorkerPools.Workers))))
+	mux.Handle("GET /v1/projects/{projectID}/worker-pools/{poolID}/workers", requireSession(limitSession(http.HandlerFunc(deps.WorkerPools.PoolWorkers))))
+
 	mux.Handle("POST /v1/workers/enroll", limitAuth(http.HandlerFunc(deps.Enrollment.Enroll)))
+
+	requireWorker := middleware.RequireWorkerToken(deps.WorkerTokenAuthenticator)
+	mux.Handle("POST /v1/workers/register", requireWorker(http.HandlerFunc(deps.WorkerRemote.Register)))
+	mux.Handle("POST /v1/workers/heartbeat", requireWorker(http.HandlerFunc(deps.WorkerRemote.Heartbeat)))
+	mux.Handle("POST /v1/workers/claim", requireWorker(http.HandlerFunc(deps.WorkerRemote.Claim)))
+	mux.Handle("POST /v1/workers/jobs/{jobID}/complete", requireWorker(http.HandlerFunc(deps.WorkerRemote.Complete)))
+	mux.Handle("POST /v1/workers/jobs/{jobID}/fail", requireWorker(http.HandlerFunc(deps.WorkerRemote.Fail)))
+	mux.Handle("POST /v1/workers/offline", requireWorker(http.HandlerFunc(deps.WorkerRemote.Offline)))
 
 	mux.Handle("GET /v1/api-keys/current", requireAPIKey(limitAPIKey(http.HandlerFunc(deps.APIKeys.Current))))
 	mux.Handle("POST /v1/jobs", requireAPIKey(limitSubmitAPIKey(http.HandlerFunc(deps.Jobs.Submit))))

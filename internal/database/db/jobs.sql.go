@@ -163,6 +163,23 @@ func (q *Queries) DeleteExpiredJobs(ctx context.Context, arg DeleteExpiredJobsPa
 	return result.RowsAffected(), nil
 }
 
+const deleteExpiredJobsAllProjects = `-- name: DeleteExpiredJobsAllProjects :execrows
+DELETE FROM jobs
+USING projects
+WHERE jobs.project_id = projects.id
+  AND projects.job_retention_days > 0
+  AND jobs.status IN ('succeeded', 'failed', 'cancelled')
+  AND jobs.updated_at < now() - make_interval(days => projects.job_retention_days)
+`
+
+func (q *Queries) DeleteExpiredJobsAllProjects(ctx context.Context) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteExpiredJobsAllProjects)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const getJob = `-- name: GetJob :one
 SELECT id, project_id, queue_name, job_type, payload, status, priority, attempts, max_attempts, scheduled_at, created_at, updated_at, idempotency_key, idempotency_hash FROM jobs WHERE id = $1
 `

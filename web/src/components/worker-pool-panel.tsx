@@ -32,7 +32,13 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
-import { api, ApiError, type WorkerPool, type WorkerPoolInput } from "@/lib/api"
+import {
+  api,
+  ApiError,
+  type WorkerPool,
+  type WorkerPoolInput,
+  type WorkerPoolStat,
+} from "@/lib/api"
 import { useAuth } from "@/lib/auth"
 import { formatDate } from "@/lib/format"
 
@@ -45,6 +51,7 @@ type PoolForm = {
   retryBackoff: "fixed" | "exponential"
   retryBase: string
   retryMax: string
+  allowedCidrs: string
 }
 
 const emptyForm: PoolForm = {
@@ -56,6 +63,7 @@ const emptyForm: PoolForm = {
   retryBackoff: "exponential",
   retryBase: "",
   retryMax: "",
+  allowedCidrs: "",
 }
 
 function formFromPool(pool: WorkerPool): PoolForm {
@@ -72,6 +80,7 @@ function formFromPool(pool: WorkerPool): PoolForm {
     retryMax: pool.retry_max_delay_seconds
       ? String(pool.retry_max_delay_seconds)
       : "",
+    allowedCidrs: pool.allowed_cidrs.join(", "),
   }
 }
 
@@ -98,6 +107,7 @@ function toInput(form: PoolForm): WorkerPoolInput {
     retry_backoff: form.retryBackoff,
     retry_base_delay_seconds: parseOptionalNumber(form.retryBase),
     retry_max_delay_seconds: parseOptionalNumber(form.retryMax),
+    allowed_cidrs: parseQueues(form.allowedCidrs),
   }
 }
 
@@ -115,6 +125,9 @@ function validNumbers(input: WorkerPoolInput): string | null {
     if (!Number.isInteger(value) || (value ?? 0) < 0 || (value ?? 0) > max) {
       return `${label} is out of range`
     }
+  }
+  if ((input.allowed_cidrs ?? []).length > 50) {
+    return "At most 50 allowed CIDRs"
   }
   if (
     (input.retry_base_delay_seconds ?? 0) > 0 &&
@@ -140,8 +153,17 @@ export function WorkerPoolPanel({ projectId }: { projectId: string }) {
     enabled: Boolean(token),
   })
 
-  const refresh = () =>
+  const statsQuery = useQuery({
+    queryKey: ["worker-pool-stats", projectId],
+    queryFn: () => api.workerPoolStats(token!, projectId),
+    enabled: Boolean(token),
+    refetchInterval: 5000,
+  })
+
+  const refresh = () => {
     queryClient.invalidateQueries({ queryKey: ["worker-pools", projectId] })
+    queryClient.invalidateQueries({ queryKey: ["worker-pool-stats", projectId] })
+  }
 
   const createPool = useMutation({
     mutationFn: (input: WorkerPoolInput & { name: string }) =>
@@ -220,6 +242,9 @@ export function WorkerPoolPanel({ projectId }: { projectId: string }) {
   }
 
   const pools = poolsQuery.data?.worker_pools ?? []
+  const stats = new Map(
+    (statsQuery.data?.stats ?? []).map((item) => [item.pool_id, item]),
+  )
 
   return (
     <Card>
@@ -357,6 +382,16 @@ export function WorkerPoolPanel({ projectId }: { projectId: string }) {
             </div>
           </div>
 
+          <div className="space-y-2">
+            <Label htmlFor="worker-pool-cidrs">Allowed CIDRs</Label>
+            <Input
+              id="worker-pool-cidrs"
+              placeholder="10.0.0.0/8, 203.0.113.7/32 (blank = any address)"
+              value={form.allowedCidrs}
+              onChange={(event) => setForm({ ...form, allowedCidrs: event.target.value })}
+            />
+          </div>
+
           <Button type="submit" className="w-full" disabled={createPool.isPending}>
             {createPool.isPending ? (
               <Loader2 className="size-4 animate-spin" />
@@ -383,6 +418,7 @@ export function WorkerPoolPanel({ projectId }: { projectId: string }) {
               <WorkerPoolRow
                 key={pool.id}
                 pool={pool}
+                stat={stats.get(pool.id)}
                 busy={
                   updatePool.isPending && updatePool.variables?.poolId === pool.id
                 }
@@ -528,6 +564,17 @@ export function WorkerPoolPanel({ projectId }: { projectId: string }) {
                 />
               </div>
             </div>
+            <div className="space-y-2">
+              <Label htmlFor="edit-pool-cidrs">Allowed CIDRs</Label>
+              <Input
+                id="edit-pool-cidrs"
+                placeholder="10.0.0.0/8 (blank = any address)"
+                value={editForm.allowedCidrs}
+                onChange={(event) =>
+                  setEditForm({ ...editForm, allowedCidrs: event.target.value })
+                }
+              />
+            </div>
             <DialogFooter>
               <Button type="button" variant="outline" onClick={() => setEditing(null)}>
                 Cancel
@@ -546,6 +593,7 @@ export function WorkerPoolPanel({ projectId }: { projectId: string }) {
 
 function WorkerPoolRow({
   pool,
+  stat,
   busy,
   issuing,
   onEdit,
@@ -554,6 +602,7 @@ function WorkerPoolRow({
   onDelete,
 }: {
   pool: WorkerPool
+  stat?: WorkerPoolStat
   busy: boolean
   issuing: boolean
   onEdit: () => void
@@ -585,6 +634,19 @@ function WorkerPoolRow({
           {timeout} · {retries} · {pool.retry_backoff} backoff · Created{" "}
           {formatDate(pool.created_at)}
         </p>
+        {stat && (
+          <p className="mt-0.5 truncate text-xs text-muted-foreground">
+            {stat.online_workers} online / {stat.offline_workers} offline ·{" "}
+            {stat.running_jobs} running · {stat.queue_depth} queued ·{" "}
+            {stat.jobs_per_minute.toFixed(1)} jobs/min ·{" "}
+            {stat.success_rate.toFixed(1)}% success
+          </p>
+        )}
+        {pool.allowed_cidrs.length > 0 && (
+          <p className="mt-0.5 truncate text-xs text-muted-foreground">
+            Allowed: {pool.allowed_cidrs.join(", ")}
+          </p>
+        )}
       </div>
       <div className="flex items-center gap-1">
         <Button

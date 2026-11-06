@@ -26,6 +26,7 @@ type Querier interface {
 	CreateWorkerPool(ctx context.Context, arg CreateWorkerPoolParams) (WorkerPool, error)
 	CreateWorkerToken(ctx context.Context, arg CreateWorkerTokenParams) (WorkerToken, error)
 	DeleteExpiredJobs(ctx context.Context, arg DeleteExpiredJobsParams) (int64, error)
+	DeleteExpiredJobsAllProjects(ctx context.Context) (int64, error)
 	DeleteExpiredSessions(ctx context.Context) error
 	DeleteProject(ctx context.Context, id uuid.UUID) error
 	DeleteWorkerPool(ctx context.Context, arg DeleteWorkerPoolParams) (int64, error)
@@ -33,6 +34,7 @@ type Querier interface {
 	GetAPIKeyByHash(ctx context.Context, keyHash string) (ApiKey, error)
 	GetEnrollmentTokenByHash(ctx context.Context, tokenHash string) (WorkerToken, error)
 	GetExecution(ctx context.Context, id uuid.UUID) (Execution, error)
+	GetExecutionForWorker(ctx context.Context, arg GetExecutionForWorkerParams) (Execution, error)
 	GetJob(ctx context.Context, id uuid.UUID) (Job, error)
 	GetJobByIdempotencyKey(ctx context.Context, arg GetJobByIdempotencyKeyParams) (Job, error)
 	GetJobForProject(ctx context.Context, arg GetJobForProjectParams) (Job, error)
@@ -41,25 +43,34 @@ type Querier interface {
 	GetUserByEmail(ctx context.Context, email string) (User, error)
 	GetUserByID(ctx context.Context, id uuid.UUID) (User, error)
 	GetWorker(ctx context.Context, id uuid.UUID) (Worker, error)
+	GetWorkerForProject(ctx context.Context, arg GetWorkerForProjectParams) (Worker, error)
 	GetWorkerPool(ctx context.Context, arg GetWorkerPoolParams) (WorkerPool, error)
+	GetWorkerPoolStats(ctx context.Context, projectID uuid.UUID) ([]GetWorkerPoolStatsRow, error)
 	GetWorkerTokenByHash(ctx context.Context, tokenHash string) (WorkerToken, error)
+	GetWorkerTokenForProject(ctx context.Context, arg GetWorkerTokenForProjectParams) (WorkerToken, error)
 	ListAPIKeysByProject(ctx context.Context, projectID uuid.UUID) ([]ApiKey, error)
 	ListActiveWorkerPools(ctx context.Context) ([]WorkerPool, error)
 	ListExecutionsByJob(ctx context.Context, jobID uuid.UUID) ([]Execution, error)
+	ListExpiredExecutions(ctx context.Context, limit int32) ([]Execution, error)
 	ListJobsByProject(ctx context.Context, arg ListJobsByProjectParams) ([]Job, error)
 	ListPendingOutboxMessages(ctx context.Context, limit int32) ([]OutboxMessage, error)
 	ListProjectsByUser(ctx context.Context, userID uuid.UUID) ([]Project, error)
 	ListWorkerPoolsByProject(ctx context.Context, projectID uuid.UUID) ([]WorkerPool, error)
 	ListWorkerTokensByProject(ctx context.Context, projectID uuid.UUID) ([]WorkerToken, error)
 	ListWorkersByProject(ctx context.Context, projectID uuid.UUID) ([]Worker, error)
+	ListWorkersWithLoad(ctx context.Context, arg ListWorkersWithLoadParams) ([]ListWorkersWithLoadRow, error)
 	MarkJobFailed(ctx context.Context, id uuid.UUID) (Job, error)
 	MarkJobScheduled(ctx context.Context, arg MarkJobScheduledParams) (Job, error)
 	MarkJobSucceeded(ctx context.Context, id uuid.UUID) (Job, error)
 	MarkOutboxMessageProcessed(ctx context.Context, id uuid.UUID) (OutboxMessage, error)
+	MarkStaleWorkersOffline(ctx context.Context, staleSeconds int32) (int64, error)
+	MarkTokenWorkersOffline(ctx context.Context, workerTokenID *uuid.UUID) error
 	MarkWorkerOffline(ctx context.Context, id uuid.UUID) error
+	RenewWorkerLeases(ctx context.Context, arg RenewWorkerLeasesParams) (int64, error)
 	RevokeAPIKey(ctx context.Context, arg RevokeAPIKeyParams) (ApiKey, error)
 	RevokeSession(ctx context.Context, tokenHash string) error
 	RevokeWorkerToken(ctx context.Context, arg RevokeWorkerTokenParams) (WorkerToken, error)
+	RotateWorkerToken(ctx context.Context, arg RotateWorkerTokenParams) (WorkerToken, error)
 	TouchAPIKey(ctx context.Context, id uuid.UUID) error
 	TouchWorkerToken(ctx context.Context, id uuid.UUID) error
 	UpdateAPIKeyHash(ctx context.Context, arg UpdateAPIKeyHashParams) error

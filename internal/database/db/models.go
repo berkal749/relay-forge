@@ -23,15 +23,16 @@ type ApiKey struct {
 }
 
 type Execution struct {
-	ID            uuid.UUID  `json:"id"`
-	JobID         uuid.UUID  `json:"job_id"`
-	WorkerID      *uuid.UUID `json:"worker_id"`
-	AttemptNumber int32      `json:"attempt_number"`
-	Status        string     `json:"status"`
-	StartedAt     time.Time  `json:"started_at"`
-	FinishedAt    *time.Time `json:"finished_at"`
-	ErrorMessage  *string    `json:"error_message"`
-	Result        []byte     `json:"result"`
+	ID             uuid.UUID  `json:"id"`
+	JobID          uuid.UUID  `json:"job_id"`
+	WorkerID       *uuid.UUID `json:"worker_id"`
+	AttemptNumber  int32      `json:"attempt_number"`
+	Status         string     `json:"status"`
+	StartedAt      time.Time  `json:"started_at"`
+	FinishedAt     *time.Time `json:"finished_at"`
+	ErrorMessage   *string    `json:"error_message"`
+	Result         []byte     `json:"result"`
+	LeaseExpiresAt *time.Time `json:"lease_expires_at"`
 }
 
 type Job struct {
@@ -100,6 +101,7 @@ type Worker struct {
 	CreatedAt       time.Time  `json:"created_at"`
 	WorkerTokenID   *uuid.UUID `json:"worker_token_id"`
 	WorkerPoolID    *uuid.UUID `json:"worker_pool_id"`
+	Mode            string     `json:"mode"`
 }
 
 type WorkerPool struct {
@@ -116,19 +118,22 @@ type WorkerPool struct {
 	RetryBackoff          string    `json:"retry_backoff"`
 	RetryBaseDelaySeconds int32     `json:"retry_base_delay_seconds"`
 	RetryMaxDelaySeconds  int32     `json:"retry_max_delay_seconds"`
+	AllowedCidrs          []string  `json:"allowed_cidrs"`
 }
 
 type WorkerToken struct {
-	ID          uuid.UUID  `json:"id"`
-	ProjectID   uuid.UUID  `json:"project_id"`
-	TokenHash   string     `json:"token_hash"`
-	TokenPrefix string     `json:"token_prefix"`
-	Name        string     `json:"name"`
-	RevokedAt   *time.Time `json:"revoked_at"`
-	ExpiresAt   *time.Time `json:"expires_at"`
-	LastUsedAt  *time.Time `json:"last_used_at"`
-	CreatedAt   time.Time  `json:"created_at"`
-	PoolID      *uuid.UUID `json:"pool_id"`
-	Kind        string     `json:"kind"`
-	ConsumedAt  *time.Time `json:"consumed_at"`
+	ID           uuid.UUID  `json:"id"`
+	ProjectID    uuid.UUID  `json:"project_id"`
+	TokenHash    string     `json:"token_hash"`
+	TokenPrefix  string     `json:"token_prefix"`
+	Name         string     `json:"name"`
+	RevokedAt    *time.Time `json:"revoked_at"`
+	ExpiresAt    *time.Time `json:"expires_at"`
+	LastUsedAt   *time.Time `json:"last_used_at"`
+	CreatedAt    time.Time  `json:"created_at"`
+	PoolID       *uuid.UUID `json:"pool_id"`
+	Kind         string     `json:"kind"`
+	ConsumedAt   *time.Time `json:"consumed_at"`
+	RotatedAt    *time.Time `json:"rotated_at"`
+	ReplacedByID *uuid.UUID `json:"replaced_by_id"`
 }

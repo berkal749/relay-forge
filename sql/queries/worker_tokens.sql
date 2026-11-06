@@ -14,6 +14,10 @@ WHERE worker_tokens.token_hash = $1
   AND projects.archived_at IS NULL
   AND (worker_pools.id IS NULL OR worker_pools.status = 'active');
 
+-- name: GetWorkerTokenForProject :one
+SELECT * FROM worker_tokens
+WHERE id = $1 AND project_id = $2 AND kind = 'worker';
+
 -- name: GetEnrollmentTokenByHash :one
 SELECT worker_tokens.* FROM worker_tokens
 JOIN worker_pools ON worker_pools.id = worker_tokens.pool_id
@@ -44,6 +48,20 @@ ORDER BY created_at DESC;
 UPDATE worker_tokens
 SET revoked_at = now()
 WHERE id = $1 AND project_id = $2 AND revoked_at IS NULL
+RETURNING *;
+
+-- name: RotateWorkerToken :one
+UPDATE worker_tokens
+SET rotated_at = now(),
+    replaced_by_id = sqlc.arg('replaced_by_id'),
+    expires_at = LEAST(
+        COALESCE(expires_at, now() + make_interval(secs => sqlc.arg('grace_seconds')::int)),
+        now() + make_interval(secs => sqlc.arg('grace_seconds')::int)
+    )
+WHERE id = sqlc.arg('id')
+  AND project_id = sqlc.arg('project_id')
+  AND kind = 'worker'
+  AND revoked_at IS NULL
 RETURNING *;
 
 -- name: TouchWorkerToken :exec
