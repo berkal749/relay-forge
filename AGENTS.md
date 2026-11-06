@@ -4,11 +4,12 @@ Guidance for AI coding agents working in the RelayForge repository.
 
 ## What this project is
 
-RelayForge is a PostgreSQL-backed background job / task queue service with three parts:
+RelayForge is a PostgreSQL-backed background job / task queue service with four parts:
 
 - **API** (`cmd/api`) — session-authenticated dashboard API plus API-key-authenticated job submission API.
 - **Worker** (`cmd/worker`) — project-scoped worker pool that dispatches the outbox, claims jobs with `FOR UPDATE SKIP LOCKED`, executes registered handlers, and records execution attempts/retries.
-- **Dashboard** (`web/`) — React + Vite + Tailwind + shadcn/ui SPA for auth, projects, project settings, API keys, worker tokens, job submission, and job inspection.
+- **Supervisor** (`cmd/supervisor`) — reconciles active `worker_pools` rows into worker child processes.
+- **Dashboard** (`web/`) — React + Vite + Tailwind + shadcn/ui SPA for auth, projects, project settings, API keys, worker pools, worker tokens, job submission, and job inspection.
 
 Stack: Go 1.26, PostgreSQL 17, pgx/v5, sqlc, golang-migrate, React 19, TypeScript, TanStack Query, pnpm.
 
@@ -58,20 +59,34 @@ make web-build          # tsc -b && vite build
 make web-lint           # oxlint
 ```
 
-Run the worker (must set a project UUID from the API):
+Run a worker directly. Credentials resolve in order: `WORKER_TOKEN` → `WORKER_TOKEN_FILE` → `WORKER_ENROLLMENT_TOKEN`:
 
 ```sh
+# Option A: explicit long-lived token
 export WORKER_PROJECT_ID=<project-uuid>
 export WORKER_TOKEN=rf_worker_...
 make run-worker
+
+# Option B: zero-touch enrollment from a pool's rf_enroll_ token
+export WORKER_ENROLLMENT_TOKEN=rf_enroll_...
+export WORKER_TOKEN_FILE=.relayforge/worker-token.json
+export RELAYFORGE_API_URL=http://localhost:8080
+make run-worker
 ```
 
-Create the `rf_worker_` token via `POST /v1/projects/{projectID}/worker-tokens` or the project dashboard. Tokens are HMAC-hashed with `WORKER_TOKEN_PEPPER` (falling back to `API_KEY_PEPPER`) and must belong to `WORKER_PROJECT_ID`.
+Create `rf_worker_` tokens via `POST /v1/projects/{projectID}/worker-tokens` or the project dashboard, and `rf_enroll_` tokens via `POST /v1/projects/{projectID}/worker-pools/{poolID}/enrollment-tokens`. Tokens are HMAC-hashed with `WORKER_TOKEN_PEPPER` (falling back to `API_KEY_PEPPER`); an explicit token must belong to `WORKER_PROJECT_ID`, and a pool-scoped token requires the pool to be active.
 
-Docker Compose worker profile:
+Run the supervisor (builds `bin/relayforge-worker` first and points the supervisor at it):
 
 ```sh
-docker compose --profile worker up -d
+make run-supervisor
+```
+
+Docker Compose profiles:
+
+```sh
+docker compose --profile worker up -d       # one standalone worker
+docker compose --profile supervisor up -d   # one worker per active pool
 ```
 
 Default database URL: `postgres://relayforge:relayforge@localhost:5435/relayforge?sslmode=disable` (host port 5435 on purpose).
@@ -169,7 +184,7 @@ registry.Register("send_email", sendEmailHandler)
 - New routes go in `internal/http/routes/routes.go` with method-prefixed patterns (e.g. `POST /v1/jobs`). Protected routes use `middleware.RequireAuth` (sessions) or `middleware.RequireAPIKey` (project API keys).
 - Use `slog` for logging; do not add a logging framework.
 - HTTP rate limiting lives in `internal/middleware/ratelimit.go`. Limits are in-memory fixed windows keyed by IP, session user, or API key; they are per process, so multi-instance deployments need a shared store.
-- Secret-bearing responses (login, API key creation, worker token creation) must set `Cache-Control: no-store`. Raw credentials are only returned once, at creation.
+- Secret-bearing responses (login, API key creation, worker token and enrollment token creation) must set `Cache-Control: no-store`. Raw credentials are only returned once, at creation.
 - Worker credentials are managed in `internal/workertoken`; enrollment is resolved in `internal/worker/credentials.go`; `internal/supervisor` reconciles pools. This is app-level auth; workers still use `DATABASE_URL` directly.
 - `cmd/supervisor` spawns the binary at `SUPERVISOR_WORKER_BINARY` (default `relayforge-worker`) and passes pool config through the environment. Cached tokens live under `SUPERVISOR_TOKEN_DIR` with `0600` permissions.
 
@@ -184,6 +199,7 @@ registry.Register("send_email", sendEmailHandler)
 
 - API calls belong in `web/src/lib/api.ts`; add types alongside existing exported types.
 - Data fetching/mutations use TanStack Query; UI primitives live in `web/src/components/ui` (shadcn/base-ui).
+- The project page composes settings plus `api-key-panel`, `worker-pool-panel`, and `worker-token-panel`; keep new project-scoped admin UI as a panel component.
 - Path alias `@/` maps to `web/src`.
 - Job status polling refreshes every 2s while active (see `pages/job.tsx` / `components/job-table.tsx`).
 - Styling is Tailwind v4 + `cn()` helper; keep components consistent with existing ones.
