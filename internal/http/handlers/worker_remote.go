@@ -18,6 +18,7 @@ import (
 	"relayforge/internal/job"
 	"relayforge/internal/metrics"
 	"relayforge/internal/middleware"
+	"relayforge/internal/notificationchannel"
 )
 
 type WorkerRemoteConfig struct {
@@ -33,14 +34,15 @@ type WorkerRemoteHandler struct {
 	queries   *db.Queries
 	execution *execution.Service
 	jobs      *job.Service
+	channels  *notificationchannel.Service
 	config    WorkerRemoteConfig
 }
 
-func NewWorkerRemoteHandler(queries *db.Queries, executionService *execution.Service, jobs *job.Service, config WorkerRemoteConfig) *WorkerRemoteHandler {
+func NewWorkerRemoteHandler(queries *db.Queries, executionService *execution.Service, jobs *job.Service, channels *notificationchannel.Service, config WorkerRemoteConfig) *WorkerRemoteHandler {
 	if config.LeaseGrace <= 0 {
 		config.LeaseGrace = time.Minute
 	}
-	return &WorkerRemoteHandler{queries: queries, execution: executionService, jobs: jobs, config: config}
+	return &WorkerRemoteHandler{queries: queries, execution: executionService, jobs: jobs, channels: channels, config: config}
 }
 
 type workerRegisterRequest struct {
@@ -361,6 +363,42 @@ func (h *WorkerRemoteHandler) Submit(w http.ResponseWriter, r *http.Request) {
 			"id":           result.Job.ID,
 			"scheduled_at": result.Job.ScheduledAt,
 			"status":       result.Job.Status,
+		},
+	})
+}
+
+// ResolveNotificationChannel returns the decrypted destination for a channel in
+// the worker token's project. Job payloads only carry the channel ID.
+func (h *WorkerRemoteHandler) ResolveNotificationChannel(w http.ResponseWriter, r *http.Request) {
+	token, _, _, ok := h.authorize(w, r)
+	if !ok {
+		return
+	}
+	if h.channels == nil {
+		httpx.WriteError(w, http.StatusServiceUnavailable, "notification channels are not configured")
+		return
+	}
+	channelID, err := uuid.Parse(r.PathValue("channelID"))
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid channel id")
+		return
+	}
+	resolved, err := h.channels.Resolve(r.Context(), token.ProjectID, channelID)
+	if errors.Is(err, notificationchannel.ErrNotFound) {
+		httpx.WriteError(w, http.StatusNotFound, "notification channel not found")
+		return
+	}
+	if err != nil {
+		slog.Error("resolve notification channel", "error", err)
+		httpx.WriteError(w, http.StatusInternalServerError, "internal server error")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"channel": map[string]any{
+			"id":     resolved.ID,
+			"kind":   resolved.Kind,
+			"config": resolved.Config,
 		},
 	})
 }

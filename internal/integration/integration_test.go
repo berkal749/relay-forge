@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,9 +16,11 @@ import (
 	"relayforge/internal/execution"
 	"relayforge/internal/invite"
 	"relayforge/internal/job"
+	"relayforge/internal/notificationchannel"
 	"relayforge/internal/outbox"
 	"relayforge/internal/project"
 	"relayforge/internal/schedule"
+	"relayforge/internal/secret"
 	"relayforge/internal/workerpool"
 	"relayforge/internal/workertoken"
 )
@@ -369,5 +372,76 @@ func TestScheduleRunDueSubmitsOnce(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("schedule did not create a job")
+	}
+}
+
+func TestNotificationChannelsEncryptAndResolve(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	queries := db.New(pool)
+	user, _ := registerUser(t, pool, auth.RegistrationOpen)
+
+	projects := project.NewService(queries, project.Limits{MaxProjectsPerUser: 5})
+	created, err := projects.Create(ctx, user.ID, "channels")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	other, err := projects.Create(ctx, user.ID, "other")
+	if err != nil {
+		t.Fatalf("create other project: %v", err)
+	}
+
+	cipher, err := secret.NewCipher(strings.Repeat("ab", 32))
+	if err != nil {
+		t.Fatalf("cipher: %v", err)
+	}
+	channels := notificationchannel.NewService(queries, projects, cipher, notificationchannel.Limits{MaxChannelsPerProject: 2})
+
+	channel, err := channels.Create(ctx, user.ID, created.ID, notificationchannel.CreateInput{
+		Name: "Alerts",
+		Kind: notificationchannel.KindSlack,
+		Config: map[string]string{
+			"webhook_url": "https://hooks.slack.com/services/secret",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create channel: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), "DELETE FROM notification_channels WHERE id = $1", channel.ID)
+	})
+
+	// The stored row must not expose the webhook URL.
+	raw, err := queries.GetNotificationChannel(ctx, db.GetNotificationChannelParams{
+		ID:        channel.ID,
+		ProjectID: created.ID,
+	})
+	if err != nil {
+		t.Fatalf("get channel: %v", err)
+	}
+	if strings.Contains(string(raw.Config), "hooks.slack.com") {
+		t.Fatal("stored config contains plaintext webhook URL")
+	}
+
+	resolved, err := channels.Resolve(ctx, created.ID, channel.ID)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if resolved.Kind != notificationchannel.KindSlack || resolved.Config["webhook_url"] != "https://hooks.slack.com/services/secret" {
+		t.Fatalf("unexpected resolved channel: %+v", resolved)
+	}
+
+	if _, err := channels.Resolve(ctx, other.ID, channel.ID); !errors.Is(err, notificationchannel.ErrNotFound) {
+		t.Fatalf("cross-project resolve error = %v, want ErrNotFound", err)
+	}
+	if _, err := channels.Create(ctx, user.ID, created.ID, notificationchannel.CreateInput{
+		Name: "Alerts", Kind: notificationchannel.KindSlack,
+		Config: map[string]string{"webhook_url": "https://example.com/hook"},
+	}); !errors.Is(err, notificationchannel.ErrNameTaken) {
+		t.Fatalf("duplicate name error = %v, want ErrNameTaken", err)
+	}
+
+	if err := channels.Delete(ctx, user.ID, created.ID, channel.ID); err != nil {
+		t.Fatalf("delete: %v", err)
 	}
 }

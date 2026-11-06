@@ -16,7 +16,7 @@ const (
 )
 
 // NewRegistry builds the worker handler registry from operator configuration.
-func NewRegistry(config Config, submitter JobSubmitter) (*execution.Registry, error) {
+func NewRegistry(config Config, submitter JobSubmitter, resolver ChannelResolver) (*execution.Registry, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
@@ -31,10 +31,10 @@ func NewRegistry(config Config, submitter JobSubmitter) (*execution.Registry, er
 	registry.Register("sleep", execution.Sleep)
 	registry.Register(JobTypeHTTPRequest, NewWebhookHandler(client))
 	registry.Register(JobTypeDelay, NewDelayHandler(submitter))
-	registry.Register(JobTypeEmail, NewEmailHandler(config.SMTP))
-	registry.Register(JobTypeSlack, NewSlackHandler(client, config.SlackWebhookURL))
-	registry.Register(JobTypeDiscord, NewDiscordHandler(client, config.DiscordWebhookURL))
-	registry.Register(JobTypeTelegram, NewTelegramHandler(client, config.TelegramBotToken, config.TelegramAPIBase))
-	registry.Register(JobTypeSMS, NewSMSHandler(client, config.Twilio))
+	registry.Register(JobTypeEmail, NewEmailHandler(config.SMTP, resolver))
+	registry.Register(JobTypeSlack, NewSlackHandler(client, config.SlackWebhookURL, resolver))
+	registry.Register(JobTypeDiscord, NewDiscordHandler(client, config.DiscordWebhookURL, resolver))
+	registry.Register(JobTypeTelegram, NewTelegramHandler(client, config.TelegramBotToken, config.TelegramAPIBase, resolver))
+	registry.Register(JobTypeSMS, NewSMSHandler(client, config.Twilio, resolver))
 	return registry, nil
 }

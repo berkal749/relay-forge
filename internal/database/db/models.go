@@ -64,6 +64,16 @@ type Job struct {
 	IdempotencyHash *string   `json:"idempotency_hash"`
 }
 
+type NotificationChannel struct {
+	ID        uuid.UUID `json:"id"`
+	ProjectID uuid.UUID `json:"project_id"`
+	Name      string    `json:"name"`
+	Kind      string    `json:"kind"`
+	Config    []byte    `json:"config"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 type OutboxMessage struct {
 	ID          uuid.UUID  `json:"id"`
 	JobID       uuid.UUID  `json:"job_id"`

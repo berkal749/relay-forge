@@ -12,10 +12,12 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
+import { JobPayloadFields } from "@/components/job-payload-fields"
+import { JobTypeSelect } from "@/components/job-type-select"
 import { Label } from "@/components/ui/label"
-import { Textarea } from "@/components/ui/textarea"
 import { api, ApiError } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
+import { examplePayloadJson, findJobType } from "@/lib/job-types"
 
 type SubmitDefaults = {
   queue_name: string
@@ -36,7 +38,7 @@ export function SubmitJobForm({
 
   const [queueName, setQueueName] = useState(defaults.queue_name)
   const [jobType, setJobType] = useState("echo")
-  const [payload, setPayload] = useState('{\n  "message": "hello"\n}')
+  const [payload, setPayload] = useState(examplePayloadJson("echo") ?? "{}")
   const [priority, setPriority] = useState(defaults.priority)
   const [maxAttempts, setMaxAttempts] = useState(defaults.max_attempts)
   const [scheduledAt, setScheduledAt] = useState("")
@@ -79,6 +81,18 @@ export function SubmitJobForm({
     submitJob.mutate()
   }
 
+  function handleJobTypeChange(next: string) {
+    const previousExample = examplePayloadJson(jobType)
+    setJobType(next)
+    const untouched = !payload.trim() || payload === previousExample
+    if (untouched) {
+      const nextExample = examplePayloadJson(next)
+      if (nextExample) setPayload(nextExample)
+    }
+  }
+
+  const jobTypeDefinition = findJobType(jobType)
+
   return (
     <Card>
       <CardHeader>
@@ -108,25 +122,35 @@ export function SubmitJobForm({
             </div>
             <div className="space-y-2">
               <Label htmlFor="job_type">Job type</Label>
-              <Input
+              <JobTypeSelect
                 id="job_type"
                 value={jobType}
-                onChange={(event) => setJobType(event.target.value)}
-                placeholder="send_email"
-                maxLength={100}
-                required
+                onChange={handleJobTypeChange}
               />
             </div>
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="payload">Payload</Label>
-            <Textarea
+            <div className="flex items-center justify-between">
+              <Label htmlFor="payload">Payload</Label>
+              {jobTypeDefinition && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setPayload(examplePayloadJson(jobType) ?? "{}")}
+                >
+                  Use example
+                </Button>
+              )}
+            </div>
+            <JobPayloadFields
+              projectId={projectId}
               id="payload"
-              className="min-h-32 font-mono text-xs leading-6"
-              value={payload}
-              onChange={(event) => setPayload(event.target.value)}
-              spellCheck={false}
+              jobType={jobType}
+              payload={payload}
+              onChange={setPayload}
+              rows={8}
             />
           </div>
 

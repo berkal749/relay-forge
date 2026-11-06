@@ -19,8 +19,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"relayforge/internal/database/db"
 	"relayforge/internal/execution"
+	"relayforge/internal/notificationchannel"
 )
 
 const (
@@ -49,13 +52,14 @@ func (s *stringList) UnmarshalJSON(data []byte) error {
 }
 
 type emailPayload struct {
-	To      stringList `json:"to"`
-	CC      stringList `json:"cc"`
-	BCC     stringList `json:"bcc"`
-	Subject string     `json:"subject"`
-	Text    string     `json:"text"`
-	HTML    string     `json:"html"`
-	ReplyTo string     `json:"reply_to"`
+	ChannelID uuid.UUID  `json:"channel_id"`
+	To        stringList `json:"to"`
+	CC        stringList `json:"cc"`
+	BCC       stringList `json:"bcc"`
+	Subject   string     `json:"subject"`
+	Text      string     `json:"text"`
+	HTML      string     `json:"html"`
+	ReplyTo   string     `json:"reply_to"`
 }
 
 type notificationPayload struct {
@@ -74,6 +78,7 @@ type notificationPayload struct {
 	To          string          `json:"to"`
 	Body        string          `json:"body"`
 	From        string          `json:"from"`
+	ChannelID   uuid.UUID       `json:"channel_id"`
 }
 
 type notificationResult struct {
@@ -83,11 +88,20 @@ type notificationResult struct {
 }
 
 // NewEmailHandler delivers email through the operator's SMTP relay.
-func NewEmailHandler(config SMTPConfig) execution.HandlerFunc {
+func NewEmailHandler(config SMTPConfig, resolver ChannelResolver) execution.HandlerFunc {
 	return func(ctx context.Context, job db.Job) (json.RawMessage, error) {
 		var payload emailPayload
 		if err := json.Unmarshal(job.Payload, &payload); err != nil {
 			return nil, execution.Permanent(fmt.Errorf("decode notify.email payload: %w", err))
+		}
+		if payload.ChannelID != uuid.Nil {
+			channel, err := resolveChannel(ctx, resolver, job.ProjectID, payload.ChannelID, notificationchannel.KindEmail)
+			if err != nil {
+				return nil, err
+			}
+			if len(payload.To) == 0 {
+				payload.To = splitCSV(channel.Config["to"])
+			}
 		}
 		if err := sendEmail(ctx, config, payload); err != nil {
 			return nil, err
@@ -97,11 +111,20 @@ func NewEmailHandler(config SMTPConfig) execution.HandlerFunc {
 }
 
 // NewSlackHandler posts a message to a Slack incoming webhook.
-func NewSlackHandler(client *http.Client, defaultWebhook string) execution.HandlerFunc {
+func NewSlackHandler(client *http.Client, defaultWebhook string, resolver ChannelResolver) execution.HandlerFunc {
 	return func(ctx context.Context, job db.Job) (json.RawMessage, error) {
 		var payload notificationPayload
 		if err := json.Unmarshal(job.Payload, &payload); err != nil {
 			return nil, execution.Permanent(fmt.Errorf("decode notify.slack payload: %w", err))
+		}
+		if payload.ChannelID != uuid.Nil {
+			channel, err := resolveChannel(ctx, resolver, job.ProjectID, payload.ChannelID, notificationchannel.KindSlack)
+			if err != nil {
+				return nil, err
+			}
+			if payload.WebhookURL == "" {
+				payload.WebhookURL = channel.Config["webhook_url"]
+			}
 		}
 		webhook := firstNonEmpty(payload.WebhookURL, defaultWebhook)
 		if webhook == "" {
@@ -139,11 +162,20 @@ func NewSlackHandler(client *http.Client, defaultWebhook string) execution.Handl
 }
 
 // NewDiscordHandler posts a message to a Discord webhook.
-func NewDiscordHandler(client *http.Client, defaultWebhook string) execution.HandlerFunc {
+func NewDiscordHandler(client *http.Client, defaultWebhook string, resolver ChannelResolver) execution.HandlerFunc {
 	return func(ctx context.Context, job db.Job) (json.RawMessage, error) {
 		var payload notificationPayload
 		if err := json.Unmarshal(job.Payload, &payload); err != nil {
 			return nil, execution.Permanent(fmt.Errorf("decode notify.discord payload: %w", err))
+		}
+		if payload.ChannelID != uuid.Nil {
+			channel, err := resolveChannel(ctx, resolver, job.ProjectID, payload.ChannelID, notificationchannel.KindDiscord)
+			if err != nil {
+				return nil, err
+			}
+			if payload.WebhookURL == "" {
+				payload.WebhookURL = channel.Config["webhook_url"]
+			}
 		}
 		webhook := firstNonEmpty(payload.WebhookURL, defaultWebhook)
 		if webhook == "" {
@@ -178,7 +210,7 @@ func NewDiscordHandler(client *http.Client, defaultWebhook string) execution.Han
 }
 
 // NewTelegramHandler sends a message through the Telegram Bot API.
-func NewTelegramHandler(client *http.Client, botToken, apiBase string) execution.HandlerFunc {
+func NewTelegramHandler(client *http.Client, botToken, apiBase string, resolver ChannelResolver) execution.HandlerFunc {
 	if apiBase == "" {
 		apiBase = "https://api.telegram.org"
 	}
@@ -187,6 +219,15 @@ func NewTelegramHandler(client *http.Client, botToken, apiBase string) execution
 		var payload notificationPayload
 		if err := json.Unmarshal(job.Payload, &payload); err != nil {
 			return nil, execution.Permanent(fmt.Errorf("decode notify.telegram payload: %w", err))
+		}
+		if payload.ChannelID != uuid.Nil {
+			channel, err := resolveChannel(ctx, resolver, job.ProjectID, payload.ChannelID, notificationchannel.KindTelegram)
+			if err != nil {
+				return nil, err
+			}
+			if payload.ChatID == "" {
+				payload.ChatID = channel.Config["chat_id"]
+			}
 		}
 		if strings.TrimSpace(botToken) == "" {
 			return nil, execution.Permanent(fmt.Errorf("notify.telegram requires TELEGRAM_BOT_TOKEN"))
@@ -222,11 +263,23 @@ func NewTelegramHandler(client *http.Client, botToken, apiBase string) execution
 }
 
 // NewSMSHandler sends an SMS through Twilio.
-func NewSMSHandler(client *http.Client, config TwilioConfig) execution.HandlerFunc {
+func NewSMSHandler(client *http.Client, config TwilioConfig, resolver ChannelResolver) execution.HandlerFunc {
 	return func(ctx context.Context, job db.Job) (json.RawMessage, error) {
 		var payload notificationPayload
 		if err := json.Unmarshal(job.Payload, &payload); err != nil {
 			return nil, execution.Permanent(fmt.Errorf("decode notify.sms payload: %w", err))
+		}
+		if payload.ChannelID != uuid.Nil {
+			channel, err := resolveChannel(ctx, resolver, job.ProjectID, payload.ChannelID, notificationchannel.KindSMS)
+			if err != nil {
+				return nil, err
+			}
+			if payload.To == "" {
+				payload.To = channel.Config["to"]
+			}
+			if payload.From == "" {
+				payload.From = channel.Config["from"]
+			}
 		}
 		if config.AccountSID == "" || config.AuthToken == "" {
 			return nil, execution.Permanent(fmt.Errorf("notify.sms requires TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN"))
@@ -494,4 +547,16 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func splitCSV(value string) stringList {
+	parts := strings.Split(value, ",")
+	result := make(stringList, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			result = append(result, part)
+		}
+	}
+	return result
 }

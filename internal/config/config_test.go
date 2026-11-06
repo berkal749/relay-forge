@@ -13,7 +13,7 @@ func clearEnv(t *testing.T) {
 		"WORKER_MODE", "WORKER_ALLOW_PRIVATE_EGRESS", "ACTION_HTTP_TIMEOUT",
 		"SMTP_HOST", "SMTP_PORT", "SMTP_TLS", "SMTP_FROM",
 		"TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TELEGRAM_BOT_TOKEN",
-		"SLACK_WEBHOOK_URL", "DISCORD_WEBHOOK_URL",
+		"SLACK_WEBHOOK_URL", "DISCORD_WEBHOOK_URL", "SECRET_ENCRYPTION_KEY",
 	} {
 		t.Setenv(name, "")
 	}
@@ -72,6 +72,17 @@ func TestProductionRejectsWeakConfig(t *testing.T) {
 			wantErr: "REGISTRATION_MODE=open",
 		},
 		{
+			name: "missing encryption key",
+			env: map[string]string{
+				"APP_ENV":             "production",
+				"API_KEY_PEPPER":      strings.Repeat("a", 32),
+				"WORKER_TOKEN_PEPPER": strings.Repeat("b", 32),
+				"REGISTRATION_MODE":   "invite",
+				"TRUST_PROXY_HEADERS": "true",
+			},
+			wantErr: "SECRET_ENCRYPTION_KEY",
+		},
+		{
 			name: "implicit proxy trust",
 			env: map[string]string{
 				"APP_ENV":             "production",
@@ -107,6 +118,7 @@ func TestProductionValidConfig(t *testing.T) {
 	t.Setenv("WORKER_TOKEN_PEPPER", strings.Repeat("b", 32))
 	t.Setenv("REGISTRATION_MODE", "invite")
 	t.Setenv("TRUST_PROXY_HEADERS", "true")
+	t.Setenv("SECRET_ENCRYPTION_KEY", strings.Repeat("ab", 32))
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)

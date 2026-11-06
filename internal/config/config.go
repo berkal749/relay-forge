@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strconv"
@@ -15,13 +17,15 @@ const (
 )
 
 type Config struct {
-	AppEnv                 string
-	DatabaseURL            string
-	DatabaseConnectTimeout time.Duration
-	HTTPAddr               string
-	SessionTTL             time.Duration
-	APIKeyPepper           string
-	WorkerTokenPepper      string
+	AppEnv                      string
+	DatabaseURL                 string
+	DatabaseConnectTimeout      time.Duration
+	HTTPAddr                    string
+	SessionTTL                  time.Duration
+	APIKeyPepper                string
+	WorkerTokenPepper           string
+	SecretEncryptionKey         string
+	SecretEncryptionKeyExplicit bool
 
 	RateLimitAuthPerMinute      int
 	RateLimitAPIPerMinute       int
@@ -42,8 +46,9 @@ type Config struct {
 	MetricsAddr    string
 	MetricsEnabled bool
 
-	APISchedulerInterval   time.Duration
-	MaxSchedulesPerProject int
+	APISchedulerInterval              time.Duration
+	MaxSchedulesPerProject            int
+	MaxNotificationChannelsPerProject int
 
 	WorkerAllowPrivateEgress bool
 	ActionHTTPTimeout        time.Duration
@@ -144,6 +149,16 @@ func Load() (Config, error) {
 	}
 	if workerTokenPepper != "" && len(workerTokenPepper) < minPepperLength {
 		return Config{}, fmt.Errorf("WORKER_TOKEN_PEPPER must be at least %d characters", minPepperLength)
+	}
+
+	secretEncryptionKey := strings.TrimSpace(os.Getenv("SECRET_ENCRYPTION_KEY"))
+	secretEncryptionKeyExplicit := secretEncryptionKey != ""
+	if secretEncryptionKey == "" && !production {
+		// Development-only fallback so notification channels work out of the
+		// box. Changing API_KEY_PEPPER rotates this key and makes existing
+		// channels unreadable.
+		sum := sha256.Sum256([]byte("relayforge-development-encryption:" + apiKeyPepper))
+		secretEncryptionKey = hex.EncodeToString(sum[:])
 	}
 
 	registrationMode := strings.ToLower(strings.TrimSpace(os.Getenv("REGISTRATION_MODE")))
@@ -325,6 +340,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	maxNotificationChannelsPerProject, err := envNonNegativeInt("MAX_NOTIFICATION_CHANNELS_PER_PROJECT", 25)
+	if err != nil {
+		return Config{}, err
+	}
 
 	workerAllowPrivateEgress, err := envBool("WORKER_ALLOW_PRIVATE_EGRESS", false)
 	if err != nil {
@@ -387,6 +406,8 @@ func Load() (Config, error) {
 		SessionTTL:                  sessionTTL,
 		APIKeyPepper:                apiKeyPepper,
 		WorkerTokenPepper:           workerTokenPepper,
+		SecretEncryptionKey:         secretEncryptionKey,
+		SecretEncryptionKeyExplicit: secretEncryptionKeyExplicit,
 		RateLimitAuthPerMinute:      rateLimitAuthPerMinute,
 		RateLimitAPIPerMinute:       rateLimitAPIPerMinute,
 		RateLimitJobSubmitPerMinute: rateLimitJobSubmitPerMinute,
@@ -406,8 +427,9 @@ func Load() (Config, error) {
 		MetricsAddr:    metricsAddr,
 		MetricsEnabled: metricsEnabled,
 
-		APISchedulerInterval:   apiSchedulerInterval,
-		MaxSchedulesPerProject: maxSchedulesPerProject,
+		APISchedulerInterval:              apiSchedulerInterval,
+		MaxSchedulesPerProject:            maxSchedulesPerProject,
+		MaxNotificationChannelsPerProject: maxNotificationChannelsPerProject,
 
 		WorkerAllowPrivateEgress: workerAllowPrivateEgress,
 		ActionHTTPTimeout:        actionHTTPTimeout,
@@ -563,6 +585,9 @@ func (c Config) ValidateAPI() error {
 	if !c.TrustProxyHeadersExplicit {
 		return fmt.Errorf("TRUST_PROXY_HEADERS must be set explicitly when APP_ENV=production")
 	}
+	if !c.SecretEncryptionKeyExplicit {
+		return fmt.Errorf("SECRET_ENCRYPTION_KEY is required when APP_ENV=production")
+	}
 	return nil
 }
 
@@ -571,6 +596,9 @@ func (c Config) ValidateAPI() error {
 func (c Config) ValidateWorker() error {
 	if c.AppEnv == "production" && c.WorkerMode == "remote" && !c.APIBaseURLExplicit {
 		return fmt.Errorf("RELAYFORGE_API_URL is required for remote workers when APP_ENV=production")
+	}
+	if c.AppEnv == "production" && c.WorkerMode == "direct" && !c.SecretEncryptionKeyExplicit {
+		return fmt.Errorf("SECRET_ENCRYPTION_KEY is required for direct workers when APP_ENV=production")
 	}
 	return nil
 }
@@ -591,8 +619,10 @@ func (c Config) LogArgs() []any {
 		"max_worker_concurrency_per_project", c.MaxWorkerConcurrencyPerProject,
 		"max_queued_jobs_per_project", c.MaxQueuedJobsPerProject,
 		"max_schedules_per_project", c.MaxSchedulesPerProject,
+		"max_notification_channels_per_project", c.MaxNotificationChannelsPerProject,
 		"api_scheduler_interval", c.APISchedulerInterval,
 		"action_http_timeout", c.ActionHTTPTimeout,
 		"allow_private_egress", c.WorkerAllowPrivateEgress,
+		"encryption_key_configured", c.SecretEncryptionKey != "",
 	}
 }

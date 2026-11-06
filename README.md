@@ -408,6 +408,22 @@ Use `delay_seconds` (up to 30 days) or `run_at` (an RFC 3339 timestamp within on
 
 Email supports multiple `to`/`cc`/`bcc` recipients and multipart text+HTML. Notification credentials live in the worker environment or `WORKER_SECRETS_FILE`, never in the database. Per-job `webhook_url` and Twilio `from` values override the operator defaults. Missing credentials and most provider `4xx` responses are terminal; `5xx`, `429`, and network errors retry.
 
+Notification jobs can reference a saved project channel instead of embedding a destination:
+
+```json
+{"job_type": "notify.discord", "payload": {"channel_id": "<channel-uuid>", "content": "Deploy finished"}}
+```
+
+Channels are managed in **Project → Settings → Notification channels** and stored encrypted at rest with `SECRET_ENCRYPTION_KEY`. Workers resolve the channel at execution time, so webhook URLs and phone numbers never appear in job payloads or job history. A job may still provide the destination directly; explicit payload values win.
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `POST` | `/v1/projects/{projectID}/notification-channels` | Create an encrypted destination (`name`, `kind`, `config`) |
+| `GET` | `/v1/projects/{projectID}/notification-channels` | List channels (configuration is never returned) |
+| `DELETE` | `/v1/projects/{projectID}/notification-channels/{channelID}` | Delete a channel |
+
+`MAX_NOTIFICATION_CHANNELS_PER_PROJECT` (default 25) caps them per project. Changing `SECRET_ENCRYPTION_KEY` makes existing channels unreadable; re-create them after rotation.
+
 #### Cron schedules
 
 Schedules are stored in PostgreSQL and evaluated by the API, independent of worker availability. Each due schedule submits a job from its template.
@@ -487,7 +503,7 @@ Production uses Caddy for TLS and dashboard hosting, keeps PostgreSQL on a priva
 docker compose -f compose.yaml -f compose.production.yaml up -d --build
 ```
 
-Production startup fails fast unless `API_KEY_PEPPER` and `WORKER_TOKEN_PEPPER` are independent 32+ character secrets, `REGISTRATION_MODE` is explicit and not `open`, and `TRUST_PROXY_HEADERS` is explicit. See [docs/operations.md](docs/operations.md) for bootstrap, invites, quotas, TLS, monitoring, backups, restore drills, worker recovery, and the beta go/no-go checklist.
+Production startup fails fast unless `API_KEY_PEPPER` and `WORKER_TOKEN_PEPPER` are independent 32+ character secrets, `SECRET_ENCRYPTION_KEY` is set, `REGISTRATION_MODE` is explicit and not `open`, and `TRUST_PROXY_HEADERS` is explicit. See [docs/operations.md](docs/operations.md) for bootstrap, invites, quotas, TLS, monitoring, backups, restore drills, worker recovery, and the beta go/no-go checklist.
 
 Prometheus metrics are served internally on `METRICS_ADDR` (default `:9090`); `/healthz` is liveness and `/readyz` checks PostgreSQL. Starter scrape config and alerts live in `deployments/prometheus/`.
 

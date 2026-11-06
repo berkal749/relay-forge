@@ -13,7 +13,7 @@ RelayForge is a PostgreSQL-backed background job / task queue service with four 
 
 Stack: Go 1.26, PostgreSQL 17, pgx/v5, sqlc, golang-migrate, React 19, TypeScript, TanStack Query, pnpm.
 
-> Repo status: history begins with the initial scaffold commit. Inspect `git log` rather than assuming earlier history. The latest schema migration is `000011_beta_hardening`.
+> Repo status: history begins with the initial scaffold commit. Inspect `git log` rather than assuming earlier history. The latest schema migration is `000013_notification_channels`.
 
 ## Prerequisites
 
@@ -125,6 +125,7 @@ Key packages:
 | `internal/project` | Project CRUD and settings; delete = archive (`archived_at`), never hard delete. |
 | `internal/job` | Job submission, validation, status model/transitions, reads. |
 | `internal/action` | Built-in handlers: `http.request`, `delay.run`, and `notify.*` channels. |
+| `internal/notificationchannel` | Project notification destinations encrypted at rest; worker-side resolution. |
 | `internal/schedule` | Cron schedule validation, persistence, and due-schedule job submission. |
 | `internal/execution` | Claim/succeed/fail transactions, retry backoff, handler registry, dev handlers. |
 | `internal/outbox` | Transactional outbox dispatcher + `pg_notify` notifier. |
@@ -150,7 +151,8 @@ Important invariants:
 - Job submission supports per-project idempotency via the `Idempotency-Key` header. The key and a request fingerprint are stored on `jobs`; replays return the original job, and a mismatched fingerprint is a conflict.
 - Users have a `role` (`user` or `admin`). Admin-only routes use `middleware.RequireAdmin` after session auth.
 - `REGISTRATION_MODE` is `open`, `invite`, or `closed`. Production requires an explicit non-open mode. Invite registration consumes the invite and creates the user in one transaction; invite tokens are single-use, optionally email-bound, optionally admin-granting, and expire after `INVITE_TTL`.
-- Quotas: `MAX_PROJECTS_PER_USER`, `MAX_WORKER_POOLS_PER_PROJECT`, `MAX_ACTIVE_POOLS_PER_PROJECT`, `MAX_WORKER_CONCURRENCY_PER_PROJECT`, `MAX_QUEUED_JOBS_PER_PROJECT`, `MAX_SCHEDULES_PER_PROJECT`. `0` disables a limit. The supervisor re-applies active-pool and concurrency caps.
+- Quotas: `MAX_PROJECTS_PER_USER`, `MAX_WORKER_POOLS_PER_PROJECT`, `MAX_ACTIVE_POOLS_PER_PROJECT`, `MAX_WORKER_CONCURRENCY_PER_PROJECT`, `MAX_QUEUED_JOBS_PER_PROJECT`, `MAX_SCHEDULES_PER_PROJECT`, `MAX_NOTIFICATION_CHANNELS_PER_PROJECT`. `0` disables a limit. The supervisor re-applies active-pool and concurrency caps.
+- `notification_channels` stores encrypted destinations (`slack`, `discord`, `telegram`, `sms`, `email`) per project. `config` is AES-256-GCM ciphertext keyed by `SECRET_ENCRYPTION_KEY`; the API never returns it. Jobs reference channels through `payload.channel_id`; workers resolve them with the token's project scope.
 - `schedules` stores cron templates per project. The API evaluates due rows every `API_SCHEDULER_INTERVAL`, submits a job with a `schedule:<id>:<run-time>` idempotency key, and advances `next_run_at` with an optimistic update. Cron uses five-field syntax plus descriptors and an IANA timezone.
 - Projects carry settings: `default_queue_name`, `default_max_attempts`, `default_priority`, `job_retention_days`, `max_concurrency`, `rate_limit_per_minute`, `default_job_timeout_seconds`. Submission defaults are applied by `job.Service.Submit`; worker limits are read at startup; retention is re-read on each cleanup tick.
 - `PATCH /v1/projects/{id}` is a partial update: omitted fields stay unchanged, and an empty update is rejected.
@@ -207,6 +209,7 @@ Action credentials (`SMTP_*`, `SLACK_WEBHOOK_URL`, `DISCORD_WEBHOOK_URL`, `TELEG
 - Use `slog` for logging; do not add a logging framework.
 - HTTP rate limiting lives in `internal/middleware/ratelimit.go`. Limits are in-memory fixed windows keyed by IP, session user, or API key; they are per process, so multi-instance deployments need a shared store.
 - Secret-bearing responses (login, API key creation, worker token and enrollment token creation) must set `Cache-Control: no-store`. Raw credentials are only returned once, at creation.
+- `internal/secret` provides AES-256-GCM encryption for notification channels. Production requires an explicit `SECRET_ENCRYPTION_KEY`; development derives one from `API_KEY_PEPPER`. Rotating it requires re-creating channels.
 - Production config validation lives in `internal/config`: independent 32+ character peppers, explicit non-open registration mode, explicit `TRUST_PROXY_HEADERS`, and `RELAYFORGE_API_URL` for remote workers. Compose has no secret defaults.
 - Prometheus instrumentation lives in `internal/metrics` and is served on `METRICS_ADDR` (default `:9090`). `/healthz` is liveness and `/readyz` pings PostgreSQL.
 - Worker credentials are managed in `internal/workertoken`; enrollment is resolved in `internal/worker/credentials.go`; remote identity and HTTP transport live in `internal/worker/remote.go`; `internal/supervisor` reconciles pools. Remote workers are API-only; direct workers use `DATABASE_URL`.
@@ -237,7 +240,7 @@ Action credentials (`SMTP_*`, `SLACK_WEBHOOK_URL`, `DISCORD_WEBHOOK_URL`, `TELEG
 - Run `make web-lint` and `make web-build` after frontend changes.
 - `internal/integration` contains database integration tests gated on `TEST_DATABASE_URL`; `make test-integration` runs them against `DATABASE_URL`.
 - `.github/workflows/ci.yml` runs build, vet, tests, race tests, sqlc drift, migration round-trip, web lint/build, and Docker builds.
-- `internal/action` tests cover webhook templating, retry classification, SSRF blocking, delay idempotency, and notification payloads. `internal/schedule` tests cover cron/timezone validation.
+- `internal/action` tests cover webhook templating, retry classification, SSRF blocking, delay idempotency, notification payloads, and channel resolution. `internal/secret` tests cover encryption round-trips and tamper detection. `internal/notificationchannel` tests cover destination validation. `internal/schedule` tests cover cron/timezone validation.
 - `scripts/backup.sh` writes a custom-format `pg_dump` with retention.
 
 ## Roadmap / known gaps

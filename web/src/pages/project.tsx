@@ -18,6 +18,7 @@ import {
 import { toast } from "sonner"
 import { ApiKeyPanel } from "@/components/api-key-panel"
 import { JobTable } from "@/components/job-table"
+import { NotificationChannelPanel } from "@/components/notification-channel-panel"
 import { ProjectSettingsDialog } from "@/components/project-settings-dialog"
 import { SchedulePanel } from "@/components/schedule-panel"
 import { SubmitJobForm } from "@/components/submit-job-form"
@@ -316,7 +317,9 @@ export function ProjectPage() {
       )}
 
       {activeTab === "settings" && (
-        <div role="tabpanel" className="grid gap-6 xl:grid-cols-2">
+        <div role="tabpanel" className="space-y-6">
+          <NotificationChannelPanel projectId={project.id} />
+          <div className="grid gap-6 xl:grid-cols-2">
           <ApiKeyPanel projectId={project.id} />
 
           <div className="space-y-6">
@@ -373,6 +376,7 @@ export function ProjectPage() {
                 </Button>
               </CardContent>
             </Card>
+          </div>
           </div>
         </div>
       )}

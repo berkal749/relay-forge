@@ -20,6 +20,7 @@ type Dependencies struct {
 	Enrollment               *handlers.EnrollmentHandler
 	WorkerRemote             *handlers.WorkerRemoteHandler
 	Schedules                *handlers.ScheduleHandler
+	Channels                 *handlers.NotificationChannelHandler
 	Jobs                     *handlers.JobHandler
 	Authenticator            middleware.Authenticator
 	APIKeyAuthenticator      middleware.APIKeyAuthenticator
@@ -94,6 +95,10 @@ func New(deps Dependencies) http.Handler {
 	mux.Handle("DELETE /v1/projects/{projectID}/worker-pools/{poolID}", requireSession(limitSession(http.HandlerFunc(deps.WorkerPools.Delete))))
 	mux.Handle("POST /v1/projects/{projectID}/worker-pools/{poolID}/enrollment-tokens", requireSession(limitSession(http.HandlerFunc(deps.WorkerPools.CreateEnrollmentToken))))
 
+	mux.Handle("POST /v1/projects/{projectID}/notification-channels", requireSession(limitSession(http.HandlerFunc(deps.Channels.Create))))
+	mux.Handle("GET /v1/projects/{projectID}/notification-channels", requireSession(limitSession(http.HandlerFunc(deps.Channels.List))))
+	mux.Handle("DELETE /v1/projects/{projectID}/notification-channels/{channelID}", requireSession(limitSession(http.HandlerFunc(deps.Channels.Delete))))
+
 	mux.Handle("POST /v1/projects/{projectID}/schedules", requireSession(limitSession(http.HandlerFunc(deps.Schedules.Create))))
 	mux.Handle("GET /v1/projects/{projectID}/schedules", requireSession(limitSession(http.HandlerFunc(deps.Schedules.List))))
 	mux.Handle("PATCH /v1/projects/{projectID}/schedules/{scheduleID}", requireSession(limitSession(http.HandlerFunc(deps.Schedules.Update))))
@@ -109,6 +114,7 @@ func New(deps Dependencies) http.Handler {
 	mux.Handle("POST /v1/workers/heartbeat", requireWorker(http.HandlerFunc(deps.WorkerRemote.Heartbeat)))
 	mux.Handle("POST /v1/workers/claim", requireWorker(http.HandlerFunc(deps.WorkerRemote.Claim)))
 	mux.Handle("POST /v1/workers/jobs", requireWorker(http.HandlerFunc(deps.WorkerRemote.Submit)))
+	mux.Handle("GET /v1/workers/notification-channels/{channelID}", requireWorker(http.HandlerFunc(deps.WorkerRemote.ResolveNotificationChannel)))
 	mux.Handle("POST /v1/workers/jobs/{jobID}/complete", requireWorker(http.HandlerFunc(deps.WorkerRemote.Complete)))
 	mux.Handle("POST /v1/workers/jobs/{jobID}/fail", requireWorker(http.HandlerFunc(deps.WorkerRemote.Fail)))
 	mux.Handle("POST /v1/workers/offline", requireWorker(http.HandlerFunc(deps.WorkerRemote.Offline)))

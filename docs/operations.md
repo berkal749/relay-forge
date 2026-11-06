@@ -45,6 +45,7 @@ MAX_WORKER_POOLS_PER_PROJECT=10
 MAX_ACTIVE_POOLS_PER_PROJECT=5
 MAX_WORKER_CONCURRENCY_PER_PROJECT=50
 MAX_QUEUED_JOBS_PER_PROJECT=100000
+SECRET_ENCRYPTION_KEY=<openssl rand -hex 32>
 ```
 
 The API refuses to start in production when a secret is missing, the two peppers
@@ -77,6 +78,7 @@ workers. The project page shows current usage against each limit.
 | `MAX_WORKER_CONCURRENCY_PER_PROJECT` | 50 | create/update + supervisor |
 | `MAX_QUEUED_JOBS_PER_PROJECT` | 100000 | `job.Service.Submit` |
 | `MAX_SCHEDULES_PER_PROJECT` | 50 | `schedule.Service.Create` |
+| `MAX_NOTIFICATION_CHANNELS_PER_PROJECT` | 25 | `notificationchannel.Service.Create` |
 
 ## Built-in actions and credentials
 
@@ -102,6 +104,17 @@ TWILIO_FROM_NUMBER=
 They never enter the database. Customers select destinations and content in job
 payloads; per-job Slack/Discord webhooks and Twilio `from` values override the
 defaults.
+
+Project-level destinations are stored in `notification_channels` and encrypted
+with `SECRET_ENCRYPTION_KEY` (AES-256-GCM). Users pick a saved channel in the
+submit form, and jobs carry only `channel_id`; workers resolve the destination
+through the API. Rotating the key makes existing channels unreadable, so
+re-create them after rotation. The API and direct workers require an explicit
+key in production; remote workers only need the API.
+
+```sh
+openssl rand -hex 32   # SECRET_ENCRYPTION_KEY
+```
 
 Outbound HTTP is restricted by `WORKER_EGRESS_ALLOWLIST` (exact hosts or
 `*.example.com`). Loopback, private, link-local, and multicast destinations are

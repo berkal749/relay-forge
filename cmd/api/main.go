@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -23,9 +24,11 @@ import (
 	"relayforge/internal/job"
 	"relayforge/internal/metrics"
 	"relayforge/internal/middleware"
+	"relayforge/internal/notificationchannel"
 	"relayforge/internal/outbox"
 	"relayforge/internal/project"
 	"relayforge/internal/schedule"
+	"relayforge/internal/secret"
 	"relayforge/internal/workerpool"
 	"relayforge/internal/workertoken"
 )
@@ -78,6 +81,13 @@ func run() error {
 	scheduleService := schedule.NewService(queries, jobService, projectService, schedule.Limits{
 		MaxSchedulesPerProject: cfg.MaxSchedulesPerProject,
 	})
+	cipher, err := secret.NewCipher(cfg.SecretEncryptionKey)
+	if err != nil {
+		return fmt.Errorf("configure secret encryption: %w", err)
+	}
+	channelService := notificationchannel.NewService(queries, projectService, cipher, notificationchannel.Limits{
+		MaxChannelsPerProject: cfg.MaxNotificationChannelsPerProject,
+	})
 	appMetrics := metrics.New()
 
 	slog.Info("API configuration", cfg.LogArgs()...)
@@ -98,7 +108,8 @@ func run() error {
 		WorkerPools:  handlers.NewWorkerPoolHandler(workerPoolService),
 		Enrollment:   handlers.NewEnrollmentHandler(workerTokenService),
 		Schedules:    handlers.NewScheduleHandler(scheduleService),
-		WorkerRemote: handlers.NewWorkerRemoteHandler(queries, executionService, jobService, handlers.WorkerRemoteConfig{
+		Channels:     handlers.NewNotificationChannelHandler(channelService),
+		WorkerRemote: handlers.NewWorkerRemoteHandler(queries, executionService, jobService, channelService, handlers.WorkerRemoteConfig{
 			LeaseGrace:        cfg.WorkerLeaseGrace,
 			TrustProxyHeaders: cfg.TrustProxyHeaders,
 			MTLSHeader:        cfg.WorkerMTLSHeader,

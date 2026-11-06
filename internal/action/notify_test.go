@@ -20,7 +20,7 @@ func TestSlackHandlerPostsText(t *testing.T) {
 	}))
 	defer server.Close()
 
-	handler := NewSlackHandler(testClient(t, true), "")
+	handler := NewSlackHandler(testClient(t, true), "", nil)
 	payload, _ := json.Marshal(map[string]any{
 		"webhook_url": server.URL,
 		"text":        "build finished",
@@ -41,7 +41,7 @@ func TestSlackHandlerUsesDefaultWebhook(t *testing.T) {
 	}))
 	defer server.Close()
 
-	handler := NewSlackHandler(testClient(t, true), server.URL)
+	handler := NewSlackHandler(testClient(t, true), server.URL, nil)
 	payload, _ := json.Marshal(map[string]any{"content": "hello"})
 	if _, err := handler(context.Background(), testJob(string(payload))); err != nil {
 		t.Fatalf("handler: %v", err)
@@ -59,7 +59,7 @@ func TestDiscordHandlerPostsContent(t *testing.T) {
 	}))
 	defer server.Close()
 
-	handler := NewDiscordHandler(testClient(t, true), "")
+	handler := NewDiscordHandler(testClient(t, true), "", nil)
 	payload, _ := json.Marshal(map[string]any{
 		"webhook_url": server.URL,
 		"content":     "deploy complete",
@@ -83,7 +83,7 @@ func TestTelegramHandler(t *testing.T) {
 	}))
 	defer server.Close()
 
-	handler := NewTelegramHandler(testClient(t, true), "secret-bot-token", server.URL)
+	handler := NewTelegramHandler(testClient(t, true), "secret-bot-token", server.URL, nil)
 	payload, _ := json.Marshal(map[string]any{
 		"chat_id": "-100123",
 		"text":    "hello telegram",
@@ -117,7 +117,7 @@ func TestSMSHandlerUsesTwilio(t *testing.T) {
 		AuthToken:  "token",
 		FromNumber: "+15550000000",
 		BaseURL:    server.URL,
-	})
+	}, nil)
 	payload, _ := json.Marshal(map[string]any{
 		"to":   "+15551111111",
 		"body": "code 1234",
@@ -144,32 +144,32 @@ func TestNotificationValidationIsPermanent(t *testing.T) {
 	}{
 		{
 			name:    "slack without webhook",
-			handler: NewSlackHandler(testClient(t, true), ""),
+			handler: NewSlackHandler(testClient(t, true), "", nil),
 			payload: `{"text":"hi"}`,
 		},
 		{
 			name:    "slack without content",
-			handler: NewSlackHandler(testClient(t, true), "https://example.com/hook"),
+			handler: NewSlackHandler(testClient(t, true), "https://example.com/hook", nil),
 			payload: `{}`,
 		},
 		{
 			name:    "telegram without token",
-			handler: NewTelegramHandler(testClient(t, true), "", ""),
+			handler: NewTelegramHandler(testClient(t, true), "", "", nil),
 			payload: `{"chat_id":"1","text":"hi"}`,
 		},
 		{
 			name:    "sms without credentials",
-			handler: NewSMSHandler(testClient(t, true), TwilioConfig{}),
+			handler: NewSMSHandler(testClient(t, true), TwilioConfig{}, nil),
 			payload: `{"to":"+15551111111","body":"hi"}`,
 		},
 		{
 			name:    "email without smtp",
-			handler: NewEmailHandler(SMTPConfig{}),
+			handler: NewEmailHandler(SMTPConfig{}, nil),
 			payload: `{"to":["a@example.com"],"subject":"hi","text":"body"}`,
 		},
 		{
 			name:    "email invalid recipient",
-			handler: NewEmailHandler(SMTPConfig{Host: "smtp.example.com", Port: 587, From: "a@example.com"}),
+			handler: NewEmailHandler(SMTPConfig{Host: "smtp.example.com", Port: 587, From: "a@example.com"}, nil),
 			payload: `{"to":["not-an-email"],"subject":"hi","text":"body"}`,
 		},
 	}
@@ -191,7 +191,7 @@ func TestSlackHandlerRetriesOnServerError(t *testing.T) {
 	}))
 	defer server.Close()
 
-	handler := NewSlackHandler(testClient(t, true), server.URL)
+	handler := NewSlackHandler(testClient(t, true), server.URL, nil)
 	payload, _ := json.Marshal(map[string]any{"text": "hi"})
 	_, err := handler(context.Background(), testJob(string(payload)))
 	if err == nil {

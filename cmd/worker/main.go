@@ -17,7 +17,9 @@ import (
 	"relayforge/internal/database/db"
 	"relayforge/internal/execution"
 	"relayforge/internal/job"
+	"relayforge/internal/notificationchannel"
 	"relayforge/internal/outbox"
+	"relayforge/internal/secret"
 	"relayforge/internal/worker"
 	"relayforge/internal/workertoken"
 )
@@ -112,7 +114,11 @@ func runRemote(cfg config.Config) error {
 	}
 
 	backend := worker.NewRemoteBackend(cfg.APIBaseURL, identity.Token, remote.WorkerID, nil)
-	registry, err := action.NewRegistry(action.FromConfig(cfg), action.NewAPISubmitter(cfg.APIBaseURL, identity.Token, nil))
+	registry, err := action.NewRegistry(
+		action.FromConfig(cfg),
+		action.NewAPISubmitter(cfg.APIBaseURL, identity.Token, nil),
+		action.NewAPIChannelResolver(cfg.APIBaseURL, identity.Token, nil),
+	)
 	if err != nil {
 		return fmt.Errorf("build handler registry: %w", err)
 	}
@@ -217,7 +223,16 @@ func runDirect(cfg config.Config) error {
 	executionService := execution.NewService(pool, retryPolicy, queueNames, maxAttemptsOverride, lease)
 	backend := worker.NewDirectBackend(executionService, queries, projectID, workerRecord.ID, lease)
 	jobService := job.NewService(pool, job.Limits{MaxQueuedJobsPerProject: cfg.MaxQueuedJobsPerProject})
-	registry, err := action.NewRegistry(action.FromConfig(cfg), action.NewDirectSubmitter(jobService, projectID))
+	cipher, err := secret.NewCipher(cfg.SecretEncryptionKey)
+	if err != nil {
+		return fmt.Errorf("configure secret encryption: %w", err)
+	}
+	channels := notificationchannel.NewService(queries, nil, cipher, notificationchannel.Limits{})
+	registry, err := action.NewRegistry(
+		action.FromConfig(cfg),
+		action.NewDirectSubmitter(jobService, projectID),
+		action.NewDirectChannelResolver(channels),
+	)
 	if err != nil {
 		return fmt.Errorf("build handler registry: %w", err)
 	}

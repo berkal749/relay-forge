@@ -20,6 +20,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
+import { JobPayloadFields } from "@/components/job-payload-fields"
+import { JobTypeSelect } from "@/components/job-type-select"
 import { Label } from "@/components/ui/label"
 import { Skeleton } from "@/components/ui/skeleton"
 import {
@@ -33,6 +35,7 @@ import {
 import { api, ApiError, type Schedule, type ScheduleInput } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
 import { formatDate } from "@/lib/format"
+import { examplePayloadJson, findJobType } from "@/lib/job-types"
 
 type ScheduleForm = {
   name: string
@@ -171,6 +174,19 @@ export function SchedulePanel({ projectId }: { projectId: string }) {
     },
   })
 
+  function handleFormJobType(next: string) {
+    setForm((current) => {
+      const nextForm = { ...current, jobType: next }
+      const raw = current.payload.trim()
+      const previousExample = examplePayloadJson(current.jobType)
+      if (!raw || raw === "{}" || raw === previousExample) {
+        const example = examplePayloadJson(next)
+        if (example) nextForm.payload = example
+      }
+      return nextForm
+    })
+  }
+
   function handleCreate(event: FormEvent) {
     event.preventDefault()
     const problem = validateForm(form)
@@ -254,12 +270,10 @@ export function SchedulePanel({ projectId }: { projectId: string }) {
           <div className="grid gap-3 sm:grid-cols-[1fr_1fr_130px_130px]">
             <div className="space-y-2">
               <Label htmlFor="schedule-job-type">Job type</Label>
-              <Input
+              <JobTypeSelect
                 id="schedule-job-type"
-                placeholder="http.request"
-                className="font-mono text-xs"
                 value={form.jobType}
-                onChange={(event) => setForm({ ...form, jobType: event.target.value })}
+                onChange={handleFormJobType}
               />
             </div>
             <div className="space-y-2">
@@ -298,13 +312,31 @@ export function SchedulePanel({ projectId }: { projectId: string }) {
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="schedule-payload">Job payload (JSON)</Label>
-            <textarea
+            <div className="flex items-center justify-between">
+              <Label htmlFor="schedule-payload">Job payload (JSON)</Label>
+              {findJobType(form.jobType) && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() =>
+                    setForm((current) => ({
+                      ...current,
+                      payload: examplePayloadJson(current.jobType) ?? current.payload,
+                    }))
+                  }
+                >
+                  Use example
+                </Button>
+              )}
+            </div>
+            <JobPayloadFields
+              projectId={projectId}
               id="schedule-payload"
+              jobType={form.jobType}
+              payload={form.payload}
+              onChange={(payload) => setForm({ ...form, payload })}
               rows={5}
-              className="w-full rounded-md border bg-background px-3 py-2 font-mono text-xs"
-              value={form.payload}
-              onChange={(event) => setForm({ ...form, payload: event.target.value })}
             />
           </div>
 
@@ -458,12 +490,12 @@ export function SchedulePanel({ projectId }: { projectId: string }) {
               </div>
               <div className="space-y-2">
                 <Label htmlFor="edit-schedule-job-type">Job type</Label>
-                <Input
+                <JobTypeSelect
+                  key={editing?.id ?? "new"}
                   id="edit-schedule-job-type"
-                  className="font-mono text-xs"
                   value={editForm.jobType}
-                  onChange={(event) =>
-                    setEditForm({ ...editForm, jobType: event.target.value })
+                  onChange={(next) =>
+                    setEditForm({ ...editForm, jobType: next })
                   }
                 />
               </div>
@@ -508,14 +540,13 @@ export function SchedulePanel({ projectId }: { projectId: string }) {
             </div>
             <div className="space-y-2">
               <Label htmlFor="edit-schedule-payload">Job payload (JSON)</Label>
-              <textarea
+              <JobPayloadFields
+                projectId={projectId}
                 id="edit-schedule-payload"
+                jobType={editForm.jobType}
+                payload={editForm.payload}
+                onChange={(payload) => setEditForm({ ...editForm, payload })}
                 rows={8}
-                className="w-full rounded-md border bg-background px-3 py-2 font-mono text-xs"
-                value={editForm.payload}
-                onChange={(event) =>
-                  setEditForm({ ...editForm, payload: event.target.value })
-                }
               />
             </div>
             <DialogFooter>

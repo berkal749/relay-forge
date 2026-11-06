@@ -110,6 +110,28 @@ export type Schedule = {
   updated_at: string
 }
 
+export type NotificationChannelKind =
+  | "slack"
+  | "discord"
+  | "telegram"
+  | "sms"
+  | "email"
+
+export type NotificationChannel = {
+  id: string
+  project_id: string
+  name: string
+  kind: NotificationChannelKind
+  created_at: string
+  updated_at: string
+}
+
+export type NotificationChannelInput = {
+  name: string
+  kind: NotificationChannelKind
+  config: Record<string, string>
+}
+
 export type ScheduleInput = {
   name?: string
   cron?: string
@@ -442,6 +464,35 @@ export const api = {
     return request<{ usage: WorkerPoolUsage }>(
       `/v1/projects/${projectId}/worker-pools/usage`,
       { token },
+    )
+  },
+
+  listNotificationChannels(token: string, projectId: string) {
+    return request<{ notification_channels: NotificationChannel[] }>(
+      `/v1/projects/${projectId}/notification-channels`,
+      { token },
+    )
+  },
+
+  createNotificationChannel(
+    token: string,
+    projectId: string,
+    input: NotificationChannelInput,
+  ) {
+    return request<{ notification_channel: NotificationChannel }>(
+      `/v1/projects/${projectId}/notification-channels`,
+      { method: "POST", token, body: input },
+    )
+  },
+
+  deleteNotificationChannel(
+    token: string,
+    projectId: string,
+    channelId: string,
+  ) {
+    return request<void>(
+      `/v1/projects/${projectId}/notification-channels/${channelId}`,
+      { method: "DELETE", token },
     )
   },
 
