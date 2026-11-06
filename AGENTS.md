@@ -6,14 +6,14 @@ Guidance for AI coding agents working in the RelayForge repository.
 
 RelayForge is a PostgreSQL-backed background job / task queue service with four parts:
 
-- **API** (`cmd/api`) — session-authenticated dashboard API plus API-key-authenticated job submission API.
+- **API** (`cmd/api`) — session-authenticated dashboard API plus API-key-authenticated job submission API, with invite-only registration, roles, quotas, and Prometheus metrics.
 - **Worker** (`cmd/worker`) — project-scoped worker pool that dispatches the outbox, claims jobs with `FOR UPDATE SKIP LOCKED`, executes registered handlers, and records execution attempts/retries.
 - **Supervisor** (`cmd/supervisor`) — reconciles active `worker_pools` rows into worker child processes.
-- **Dashboard** (`web/`) — React + Vite + Tailwind + shadcn/ui SPA for auth, projects, project settings, API keys, worker pools, worker tokens, job submission, and job inspection.
+- **Dashboard** (`web/`) — React + Vite + Tailwind + shadcn/ui SPA for auth, projects, project settings, API keys, worker pools, worker tokens, quotas, admin invites, job submission, and job inspection.
 
 Stack: Go 1.26, PostgreSQL 17, pgx/v5, sqlc, golang-migrate, React 19, TypeScript, TanStack Query, pnpm.
 
-> Repo status: history begins with the initial scaffold commit. Inspect `git log` rather than assuming earlier history. The latest schema migration is `000010_remote_workers`.
+> Repo status: history begins with the initial scaffold commit. Inspect `git log` rather than assuming earlier history. The latest schema migration is `000011_beta_hardening`.
 
 ## Prerequisites
 
@@ -115,7 +115,8 @@ Key packages:
 | `internal/config` | Env-var loading/validation. All configuration is here. |
 | `internal/database` | pgxpool connection helper. |
 | `internal/database/db` | **Generated** by sqlc. Do not edit by hand; change `sql/queries` then `make sqlc-generate`. |
-| `internal/auth` | Registration, login, opaque session tokens (SHA-256 hashed at rest), bcrypt passwords. |
+| `internal/auth` | Registration modes, login, opaque session tokens (SHA-256 hashed at rest), bcrypt passwords, bootstrap admin promotion. |
+| `internal/invite` | Single-use `rf_invite_` tokens for invite-only registration; hashed at rest with roles and expiry. |
 | `internal/apikey` | `rf_live_` API keys, HMAC-SHA256 hashed at rest, expiry/last-used, project ownership checks. |
 | `internal/workertoken` | `rf_worker_` and single-use `rf_enroll_` tokens, HMAC-hashed, enrollment exchange. |
 | `internal/workerpool` | Worker pool CRUD, validation, ownership, enrollment-token issuance. |
@@ -145,6 +146,9 @@ Important invariants:
 - Project deletion archives; API-key auth and project reads filter out archived projects.
 - Revoked API keys and archived projects cannot authenticate. API keys are HMAC-SHA256 hashed with `API_KEY_PEPPER`, may expire, track `last_used_at`, and expose only `key_prefix`. Legacy unsalted hashes are upgraded on successful authentication.
 - Job submission supports per-project idempotency via the `Idempotency-Key` header. The key and a request fingerprint are stored on `jobs`; replays return the original job, and a mismatched fingerprint is a conflict.
+- Users have a `role` (`user` or `admin`). Admin-only routes use `middleware.RequireAdmin` after session auth.
+- `REGISTRATION_MODE` is `open`, `invite`, or `closed`. Production requires an explicit non-open mode. Invite registration consumes the invite and creates the user in one transaction; invite tokens are single-use, optionally email-bound, optionally admin-granting, and expire after `INVITE_TTL`.
+- Quotas: `MAX_PROJECTS_PER_USER`, `MAX_WORKER_POOLS_PER_PROJECT`, `MAX_ACTIVE_POOLS_PER_PROJECT`, `MAX_WORKER_CONCURRENCY_PER_PROJECT`, `MAX_QUEUED_JOBS_PER_PROJECT`. `0` disables a limit. The supervisor re-applies active-pool and concurrency caps.
 - Projects carry settings: `default_queue_name`, `default_max_attempts`, `default_priority`, `job_retention_days`, `max_concurrency`, `rate_limit_per_minute`, `default_job_timeout_seconds`. Submission defaults are applied by `job.Service.Submit`; worker limits are read at startup; retention is re-read on each cleanup tick.
 - `PATCH /v1/projects/{id}` is a partial update: omitted fields stay unchanged, and an empty update is rejected.
 - Worker pools are per-project desired config (`name`, `concurrency`, `active`/`paused`, `queue_names`, `job_timeout_seconds`, `max_attempts`, `retry_backoff`, retry delays). Names are unique per project; concurrency is 1–1000 (default 4). Empty `queue_names` means all queues.
@@ -190,6 +194,8 @@ registry.Register("send_email", sendEmailHandler)
 - Use `slog` for logging; do not add a logging framework.
 - HTTP rate limiting lives in `internal/middleware/ratelimit.go`. Limits are in-memory fixed windows keyed by IP, session user, or API key; they are per process, so multi-instance deployments need a shared store.
 - Secret-bearing responses (login, API key creation, worker token and enrollment token creation) must set `Cache-Control: no-store`. Raw credentials are only returned once, at creation.
+- Production config validation lives in `internal/config`: independent 32+ character peppers, explicit non-open registration mode, explicit `TRUST_PROXY_HEADERS`, and `RELAYFORGE_API_URL` for remote workers. Compose has no secret defaults.
+- Prometheus instrumentation lives in `internal/metrics` and is served on `METRICS_ADDR` (default `:9090`). `/healthz` is liveness and `/readyz` pings PostgreSQL.
 - Worker credentials are managed in `internal/workertoken`; enrollment is resolved in `internal/worker/credentials.go`; remote identity and HTTP transport live in `internal/worker/remote.go`; `internal/supervisor` reconciles pools. Remote workers are API-only; direct workers use `DATABASE_URL`.
 - `cmd/supervisor` spawns the binary at `SUPERVISOR_WORKER_BINARY` (default `relayforge-worker`) and passes pool config through the environment. Cached tokens live under `SUPERVISOR_TOKEN_DIR` with `0600` permissions.
 
@@ -214,27 +220,33 @@ registry.Register("send_email", sendEmailHandler)
 
 - `make test` / `go test ./...` is the baseline. Unit tests cover auth validation, API key hashing, worker tokens/enrollment helpers, worker pools, job defaults/idempotency, backoff/status, project settings, the worker limiter, and HTTP rate limiting.
 - Tests live in `internal/<domain>/*_test.go` and are table-driven where practical.
-- Remote protocol, CIDR, egress-allowlist, and worker-credential helpers have unit tests. There are still no database integration tests. Keep new unit tests free of external dependencies; integration tests should be isolated and clearly marked.
+- Remote protocol, CIDR, egress-allowlist, and worker-credential helpers have unit tests. `internal/integration` has database-backed invite, quota, job lifecycle, and lease-recovery tests gated on `TEST_DATABASE_URL`. Keep new unit tests free of external dependencies; integration tests must skip cleanly when the database URL is absent.
 - Run `make web-lint` and `make web-build` after frontend changes.
+- `internal/integration` contains database integration tests gated on `TEST_DATABASE_URL`; `make test-integration` runs them against `DATABASE_URL`.
+- `.github/workflows/ci.yml` runs build, vet, tests, race tests, sqlc drift, migration round-trip, web lint/build, and Docker builds.
+- `scripts/backup.sh` writes a custom-format `pg_dump` with retention.
 
 ## Roadmap / known gaps
 
 Planned work, roughly in order:
 
-1. **Structured logging and metrics** — consistent `slog` attributes, request IDs, and counters/histograms for jobs, executions, retries, API errors, and rate-limit rejections.
+1. **Structured logging and metrics** — consistent `slog` attributes and request IDs. Prometheus counters/histograms for HTTP, jobs, workers, queues, outbox, and lease reaping are implemented.
 2. **Integration and failure-recovery tests** — API/database integration coverage plus worker crash, retry exhaustion, timeout, shutdown, and outbox failure scenarios.
-3. **GitHub Actions CI** — build, vet, test, sqlc drift check, migration check, frontend lint/build.
-4. **Production Docker deployment** — non-root runtime, health checks, resource limits, and hardened Compose/Kubernetes manifests. Current Dockerfile/Compose are development-oriented.
-5. **Documentation and demo** — finish operational docs and record a walkthrough.
+3. **GitHub Actions CI** — implemented in `.github/workflows/ci.yml`.
+4. **Production Docker deployment** — non-root runtime, resource limits, private networking, and a Caddy TLS/dashboard image. Kubernetes manifests remain future work.
+5. **Documentation and demo** — `docs/operations.md` covers beta operations; a recorded walkthrough remains.
 
 Other known gaps:
 
 - No job cancellation endpoint even though the status model and docs support `cancelled`; `UpdateJobStatus` is unused.
+- Invite delivery is manual (copy the link/token); there is no email sending.
+- Quotas are global env defaults; per-project or per-plan overrides are not implemented.
 - No `LISTEN` consumer for `relayforge_jobs`; the worker relies on polling.
 - `outbox_messages` has a `failed` status but no retry/dead-letter handling.
 - Worker is single-project per process; the supervisor runs one process per active pool. There is no replicas-per-pool field, multi-project host, or autoscaling.
 - No per-queue concurrency or job priority feedback beyond SQL ordering.
 - API and worker rate limiting are per process; multi-instance deployments need a shared store.
+- Metrics and rate limits are single-instance; no distributed tracing or OpenTelemetry.
 - API key rotation and worker token scopes are not implemented (worker token expiry, revocation, last-used tracking, rotation with grace, and enrollment-based rotation are).
 - Remote workers no longer need database access. Direct mode still uses a database role; worker token auth is application-level and does not restrict that role.
 - Token rotation is manual; workers reload the new token on restart (or when the cached token file is replaced). There is no push-based config or token delivery.

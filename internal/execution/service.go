@@ -105,10 +105,17 @@ func (s *Service) ClaimJob(ctx context.Context, params ClaimParams) (Claim, erro
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	queueNames := params.QueueNames
+	if queueNames == nil {
+		// cardinality(NULL) is NULL, which would make the "all queues" branch
+		// never match. Pass an empty array so cardinality is 0.
+		queueNames = []string{}
+	}
+
 	queries := db.New(tx)
 	job, err := queries.ClaimJob(ctx, db.ClaimJobParams{
 		ProjectID:           params.ProjectID,
-		QueueNames:          params.QueueNames,
+		QueueNames:          queueNames,
 		MaxAttemptsOverride: params.MaxAttempts,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {

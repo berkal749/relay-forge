@@ -23,6 +23,7 @@ const (
 )
 
 var (
+	ErrProjectLimit            = errors.New("project limit reached for this account")
 	ErrInvalidName             = errors.New("project name must be between 1 and 100 characters")
 	ErrProjectNotFound         = errors.New("project not found")
 	ErrEmptyUpdate             = errors.New("update must contain at least one field")
@@ -57,18 +58,35 @@ func (i UpdateInput) Empty() bool {
 		i.DefaultJobTimeoutSeconds == nil
 }
 
-type Service struct {
-	queries *db.Queries
+// Limits caps per-account and per-project resource usage. A zero value means
+// unlimited, which is useful for development.
+type Limits struct {
+	MaxProjectsPerUser int
 }
 
-func NewService(queries *db.Queries) *Service {
-	return &Service{queries: queries}
+type Service struct {
+	queries *db.Queries
+	limits  Limits
+}
+
+func NewService(queries *db.Queries, limits Limits) *Service {
+	return &Service{queries: queries, limits: limits}
 }
 
 func (s *Service) Create(ctx context.Context, userID uuid.UUID, name string) (db.Project, error) {
 	name, err := validateName(name)
 	if err != nil {
 		return db.Project{}, err
+	}
+
+	if s.limits.MaxProjectsPerUser > 0 {
+		count, err := s.queries.CountProjectsByUser(ctx, userID)
+		if err != nil {
+			return db.Project{}, fmt.Errorf("count projects: %w", err)
+		}
+		if count >= int64(s.limits.MaxProjectsPerUser) {
+			return db.Project{}, ErrProjectLimit
+		}
 	}
 
 	project, err := s.queries.CreateProject(ctx, db.CreateProjectParams{

@@ -1,21 +1,33 @@
 import { useState, type FormEvent } from "react"
-import { Link, useNavigate } from "react-router-dom"
-import { ArrowRight, Loader2, LockKeyhole, Mail, ShieldCheck } from "lucide-react"
+import { Link, useNavigate, useSearchParams } from "react-router-dom"
+import { useQuery } from "@tanstack/react-query"
+import { ArrowRight, Loader2, LockKeyhole, Mail, ShieldCheck, Ticket } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { ApiError } from "@/lib/api"
+import { api, ApiError } from "@/lib/api"
 import { useAuth } from "@/lib/auth"
 import { AuthLayout, ErrorBox } from "@/pages/login"
 
 export function RegisterPage() {
   const { register } = useAuth()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [confirm, setConfirm] = useState("")
+  const [inviteToken, setInviteToken] = useState(searchParams.get("invite") ?? "")
   const [error, setError] = useState("")
   const [submitting, setSubmitting] = useState(false)
+
+  const configQuery = useQuery({
+    queryKey: ["auth-config"],
+    queryFn: () => api.authConfig(),
+    staleTime: 60_000,
+  })
+  const registrationMode = configQuery.data?.registration_mode ?? "open"
+  const registrationClosed = registrationMode === "closed"
+  const inviteRequired = registrationMode === "invite"
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault()
@@ -29,10 +41,14 @@ export function RegisterPage() {
       setError("Passwords do not match.")
       return
     }
+    if (inviteRequired && !inviteToken.trim()) {
+      setError("An invite token is required.")
+      return
+    }
 
     setSubmitting(true)
     try {
-      await register(email, password)
+      await register(email, password, inviteRequired ? inviteToken.trim() : undefined)
       navigate("/", { replace: true })
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Unable to create account")
@@ -48,6 +64,25 @@ export function RegisterPage() {
     >
       <form className="space-y-5" onSubmit={handleSubmit}>
         {error && <ErrorBox message={error} />}
+        {registrationClosed && (
+          <ErrorBox message="Registration is closed. Ask an administrator for an invite." />
+        )}
+        {inviteRequired && (
+          <div className="space-y-2">
+            <Label htmlFor="invite">Invite token</Label>
+            <div className="relative">
+              <Ticket className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                id="invite"
+                placeholder="rf_invite_..."
+                className="pl-9 font-mono text-xs"
+                value={inviteToken}
+                onChange={(event) => setInviteToken(event.target.value)}
+                required
+              />
+            </div>
+          </div>
+        )}
 
         <div className="space-y-2">
           <Label htmlFor="email">Email</Label>
@@ -104,7 +139,11 @@ export function RegisterPage() {
           </div>
         </div>
 
-        <Button type="submit" className="h-9 w-full" disabled={submitting}>
+        <Button
+          type="submit"
+          className="h-9 w-full"
+          disabled={submitting || registrationClosed || configQuery.isLoading}
+        >
           {submitting ? <Loader2 className="size-4 animate-spin" /> : null}
           Create account
           {!submitting && <ArrowRight className="size-4" />}

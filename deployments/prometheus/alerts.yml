@@ -1,0 +1,47 @@
+groups:
+  - name: relayforge
+    rules:
+      - alert: RelayForgeApiDown
+        expr: up{job="relayforge-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: RelayForge API is not responding to scrapes
+      - alert: RelayForgeHigh5xxRate
+        expr: |
+          sum(rate(relayforge_http_requests_total{status=~"5.."}[5m]))
+          /
+          sum(rate(relayforge_http_requests_total[5m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: More than 5% of API requests are failing
+      - alert: RelayForgePoolWithoutWorkers
+        expr: relayforge_online_workers == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: A project has no online workers
+      - alert: RelayForgeQueueBacklog
+        expr: relayforge_queue_depth > 10000
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Queue depth above 10,000 jobs
+      - alert: RelayForgeOutboxBacklog
+        expr: relayforge_outbox_backlog > 1000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Outbox dispatcher is falling behind
+      - alert: RelayForgeLeaseReaping
+        expr: increase(relayforge_leases_reaped_total[10m]) > 10
+        labels:
+          severity: warning
+        annotations:
+          summary: Multiple worker leases expired recently; check worker health

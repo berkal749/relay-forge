@@ -27,7 +27,23 @@ type Config struct {
 	RateLimitAPIPerMinute       int
 	RateLimitJobSubmitPerMinute int
 
+	RegistrationMode          string
+	RegistrationModeExplicit  bool
+	BootstrapAdminEmail       string
+	InviteTTL                 time.Duration
+	TrustProxyHeadersExplicit bool
+
+	MaxProjectsPerUser             int
+	MaxWorkerPoolsPerProject       int
+	MaxActivePoolsPerProject       int
+	MaxWorkerConcurrencyPerProject int
+	MaxQueuedJobsPerProject        int
+
+	MetricsAddr    string
+	MetricsEnabled bool
+
 	DatabaseURLExplicit bool
+	APIBaseURLExplicit  bool
 
 	WorkerMode              string
 	WorkerProjectID         string
@@ -85,23 +101,49 @@ func Load() (Config, error) {
 		appEnv = "development"
 	}
 
+	production := appEnv == "production"
+
+	// Peppers are validated here when present. API-only production requirements
+	// live in ValidateAPI so workers and the supervisor can start without them.
 	apiKeyPepper := os.Getenv("API_KEY_PEPPER")
-	if apiKeyPepper == "" {
-		if appEnv == "production" {
-			return Config{}, fmt.Errorf("API_KEY_PEPPER is required when APP_ENV=production")
-		}
+	if apiKeyPepper == "" && !production {
 		apiKeyPepper = "relayforge-development-pepper"
 	}
-	if len(apiKeyPepper) < 16 {
-		return Config{}, fmt.Errorf("API_KEY_PEPPER must be at least 16 characters")
+	minPepperLength := 16
+	if production {
+		minPepperLength = 32
+	}
+	if apiKeyPepper != "" && len(apiKeyPepper) < minPepperLength {
+		return Config{}, fmt.Errorf("API_KEY_PEPPER must be at least %d characters", minPepperLength)
 	}
 
 	workerTokenPepper := os.Getenv("WORKER_TOKEN_PEPPER")
 	if workerTokenPepper == "" {
 		workerTokenPepper = apiKeyPepper
 	}
-	if len(workerTokenPepper) < 16 {
-		return Config{}, fmt.Errorf("WORKER_TOKEN_PEPPER must be at least 16 characters")
+	if workerTokenPepper != "" && len(workerTokenPepper) < minPepperLength {
+		return Config{}, fmt.Errorf("WORKER_TOKEN_PEPPER must be at least %d characters", minPepperLength)
+	}
+
+	registrationMode := strings.ToLower(strings.TrimSpace(os.Getenv("REGISTRATION_MODE")))
+	registrationModeExplicit := registrationMode != ""
+	if registrationMode == "" {
+		if production {
+			registrationMode = "invite"
+		} else {
+			registrationMode = "open"
+		}
+	}
+	if registrationMode != "open" && registrationMode != "invite" && registrationMode != "closed" {
+		return Config{}, fmt.Errorf("REGISTRATION_MODE must be open, invite, or closed")
+	}
+
+	inviteTTL, err := envDuration("INVITE_TTL", 7*24*time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
+	if inviteTTL < time.Hour || inviteTTL > 30*24*time.Hour {
+		return Config{}, fmt.Errorf("INVITE_TTL must be between 1h and 720h")
 	}
 
 	rateLimitAuthPerMinute, err := envNonNegativeInt("RATE_LIMIT_AUTH_PER_MINUTE", 20)
@@ -184,6 +226,7 @@ func Load() (Config, error) {
 	}
 
 	apiBaseURL := os.Getenv("RELAYFORGE_API_URL")
+	apiBaseURLExplicit := apiBaseURL != ""
 	if apiBaseURL == "" {
 		apiBaseURL = "http://localhost:8080"
 	}
@@ -222,13 +265,48 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	trustProxyHeaders := false
-	if value := strings.TrimSpace(os.Getenv("TRUST_PROXY_HEADERS")); value != "" {
-		trustProxyHeaders, err = strconv.ParseBool(value)
+	trustProxyValue := strings.TrimSpace(os.Getenv("TRUST_PROXY_HEADERS"))
+	trustProxyHeadersExplicit := trustProxyValue != ""
+	if trustProxyValue != "" {
+		trustProxyHeaders, err = strconv.ParseBool(trustProxyValue)
 		if err != nil {
 			return Config{}, fmt.Errorf("parse TRUST_PROXY_HEADERS: %w", err)
 		}
 	}
 	workerEgressAllowlist := splitList(os.Getenv("WORKER_EGRESS_ALLOWLIST"))
+
+	maxProjectsPerUser, err := envNonNegativeInt("MAX_PROJECTS_PER_USER", 5)
+	if err != nil {
+		return Config{}, err
+	}
+	maxWorkerPoolsPerProject, err := envNonNegativeInt("MAX_WORKER_POOLS_PER_PROJECT", 10)
+	if err != nil {
+		return Config{}, err
+	}
+	maxActivePoolsPerProject, err := envNonNegativeInt("MAX_ACTIVE_POOLS_PER_PROJECT", 5)
+	if err != nil {
+		return Config{}, err
+	}
+	maxWorkerConcurrencyPerProject, err := envNonNegativeInt("MAX_WORKER_CONCURRENCY_PER_PROJECT", 50)
+	if err != nil {
+		return Config{}, err
+	}
+	maxQueuedJobsPerProject, err := envNonNegativeInt("MAX_QUEUED_JOBS_PER_PROJECT", 100000)
+	if err != nil {
+		return Config{}, err
+	}
+
+	metricsAddr := os.Getenv("METRICS_ADDR")
+	if metricsAddr == "" {
+		metricsAddr = ":9090"
+	}
+	metricsEnabled := true
+	if value := strings.TrimSpace(os.Getenv("METRICS_ENABLED")); value != "" {
+		metricsEnabled, err = strconv.ParseBool(value)
+		if err != nil {
+			return Config{}, fmt.Errorf("parse METRICS_ENABLED: %w", err)
+		}
+	}
 
 	supervisorPollInterval, err := envDuration("SUPERVISOR_POLL_INTERVAL", 5*time.Second)
 	if err != nil {
@@ -256,6 +334,22 @@ func Load() (Config, error) {
 		RateLimitAPIPerMinute:       rateLimitAPIPerMinute,
 		RateLimitJobSubmitPerMinute: rateLimitJobSubmitPerMinute,
 
+		RegistrationMode:          registrationMode,
+		RegistrationModeExplicit:  registrationModeExplicit,
+		BootstrapAdminEmail:       strings.ToLower(strings.TrimSpace(os.Getenv("BOOTSTRAP_ADMIN_EMAIL"))),
+		InviteTTL:                 inviteTTL,
+		TrustProxyHeadersExplicit: trustProxyHeadersExplicit,
+
+		MaxProjectsPerUser:             maxProjectsPerUser,
+		MaxWorkerPoolsPerProject:       maxWorkerPoolsPerProject,
+		MaxActivePoolsPerProject:       maxActivePoolsPerProject,
+		MaxWorkerConcurrencyPerProject: maxWorkerConcurrencyPerProject,
+		MaxQueuedJobsPerProject:        maxQueuedJobsPerProject,
+
+		MetricsAddr:    metricsAddr,
+		MetricsEnabled: metricsEnabled,
+
+		APIBaseURLExplicit:      apiBaseURLExplicit,
 		WorkerMode:              workerMode,
 		WorkerProjectID:         os.Getenv("WORKER_PROJECT_ID"),
 		WorkerToken:             os.Getenv("WORKER_TOKEN"),
@@ -347,4 +441,64 @@ func defaultWorkerName() string {
 		return "relayforge-worker"
 	}
 	return "relayforge-worker-" + hostname
+}
+
+// ValidateAPI enforces API-only production requirements. Workers and the
+// supervisor do not need API key peppers or registration settings.
+func (c Config) ValidateAPI() error {
+	if c.AppEnv != "production" {
+		return nil
+	}
+	if c.APIKeyPepper == "" || c.APIKeyPepper == "relayforge-development-pepper" {
+		return fmt.Errorf("API_KEY_PEPPER is required when APP_ENV=production")
+	}
+	if len(c.APIKeyPepper) < 32 {
+		return fmt.Errorf("API_KEY_PEPPER must be at least 32 characters when APP_ENV=production")
+	}
+	if c.WorkerTokenPepper == "" {
+		return fmt.Errorf("WORKER_TOKEN_PEPPER is required when APP_ENV=production")
+	}
+	if len(c.WorkerTokenPepper) < 32 {
+		return fmt.Errorf("WORKER_TOKEN_PEPPER must be at least 32 characters when APP_ENV=production")
+	}
+	if c.WorkerTokenPepper == c.APIKeyPepper {
+		return fmt.Errorf("WORKER_TOKEN_PEPPER must differ from API_KEY_PEPPER when APP_ENV=production")
+	}
+	if !c.RegistrationModeExplicit {
+		return fmt.Errorf("REGISTRATION_MODE is required when APP_ENV=production")
+	}
+	if c.RegistrationMode == "open" {
+		return fmt.Errorf("REGISTRATION_MODE=open is not allowed when APP_ENV=production")
+	}
+	if !c.TrustProxyHeadersExplicit {
+		return fmt.Errorf("TRUST_PROXY_HEADERS must be set explicitly when APP_ENV=production")
+	}
+	return nil
+}
+
+// ValidateWorker rejects unsafe worker/supervisor combinations. Remote workers
+// must know the API URL, and production deployments must set it explicitly.
+func (c Config) ValidateWorker() error {
+	if c.AppEnv == "production" && c.WorkerMode == "remote" && !c.APIBaseURLExplicit {
+		return fmt.Errorf("RELAYFORGE_API_URL is required for remote workers when APP_ENV=production")
+	}
+	return nil
+}
+
+// LogArgs returns non-secret configuration suitable for a startup log line.
+func (c Config) LogArgs() []any {
+	return []any{
+		"app_env", c.AppEnv,
+		"http_addr", c.HTTPAddr,
+		"registration_mode", c.RegistrationMode,
+		"trust_proxy_headers", c.TrustProxyHeaders,
+		"worker_mode", c.WorkerMode,
+		"metrics_enabled", c.MetricsEnabled,
+		"metrics_addr", c.MetricsAddr,
+		"max_projects_per_user", c.MaxProjectsPerUser,
+		"max_worker_pools_per_project", c.MaxWorkerPoolsPerProject,
+		"max_active_pools_per_project", c.MaxActivePoolsPerProject,
+		"max_worker_concurrency_per_project", c.MaxWorkerConcurrencyPerProject,
+		"max_queued_jobs_per_project", c.MaxQueuedJobsPerProject,
+	}
 }

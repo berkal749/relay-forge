@@ -21,3 +21,6 @@
 
 # Cached worker credentials
 .relayforge/
+
+# Local database backups
+/backups/

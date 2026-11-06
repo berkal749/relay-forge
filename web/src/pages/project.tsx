@@ -61,6 +61,13 @@ export function ProjectPage() {
     refetchInterval: 3000,
   })
 
+  const usageQuery = useQuery({
+    queryKey: ["pool-usage", projectId],
+    queryFn: () => api.workerPoolUsage(token!, projectId!),
+    enabled: Boolean(token && projectId),
+    refetchInterval: 10000,
+  })
+
   const renameProject = useMutation({
     mutationFn: (nextName: string) =>
       api.updateProject(token!, projectId!, { name: nextName }),
@@ -205,6 +212,28 @@ export function ProjectPage() {
         </div>
 
         <div className="space-y-6">
+          {usageQuery.data && (
+            <Card>
+              <CardContent className="space-y-2 py-4">
+                <p className="text-sm font-medium">Project limits</p>
+                <UsageRow
+                  label="Worker pools"
+                  used={usageQuery.data.usage.pool_count}
+                  limit={usageQuery.data.usage.max_pools}
+                />
+                <UsageRow
+                  label="Active pools"
+                  used={usageQuery.data.usage.active_pool_count}
+                  limit={usageQuery.data.usage.max_active_pools}
+                />
+                <UsageRow
+                  label="Total concurrency"
+                  used={usageQuery.data.usage.concurrency}
+                  limit={usageQuery.data.usage.max_concurrency}
+                />
+              </CardContent>
+            </Card>
+          )}
           <ApiKeyPanel projectId={project.id} />
           <WorkerFleetPanel projectId={project.id} />
           <WorkerPoolPanel projectId={project.id} />
@@ -307,5 +336,27 @@ function StatCard({
         </span>
       </CardContent>
     </Card>
+  )
+}
+
+function UsageRow({
+  label,
+  used,
+  limit,
+}: {
+  label: string
+  used: number
+  limit: number
+}) {
+  const capped = limit > 0
+  const atLimit = capped && used >= limit
+  return (
+    <div className="flex items-center justify-between text-sm">
+      <span className="text-muted-foreground">{label}</span>
+      <span className={atLimit ? "font-medium text-destructive" : "tabular-nums"}>
+        {used}
+        {capped ? ` / ${limit}` : " / unlimited"}
+      </span>
+    </div>
   )
 }

@@ -59,7 +59,37 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 export type User = {
   id: string
   email: string
+  role: "user" | "admin"
   created_at: string
+}
+
+export type AuthConfig = {
+  registration_mode: "open" | "invite" | "closed"
+}
+
+export type Invite = {
+  id: string
+  email: string | null
+  role: "user" | "admin"
+  created_by: string | null
+  consumed_by: string | null
+  expires_at: string
+  consumed_at: string | null
+  created_at: string
+}
+
+export type CreatedInvite = {
+  invite: Invite
+  token: string
+}
+
+export type WorkerPoolUsage = {
+  pool_count: number
+  max_pools: number
+  active_pool_count: number
+  max_active_pools: number
+  concurrency: number
+  max_concurrency: number
 }
 
 export type Project = {
@@ -208,10 +238,18 @@ export type LoginResult = {
 }
 
 export const api = {
-  register(email: string, password: string) {
+  authConfig() {
+    return request<AuthConfig>("/v1/auth/config")
+  },
+
+  register(email: string, password: string, inviteToken?: string) {
     return request<{ user: User }>("/v1/auth/register", {
       method: "POST",
-      body: { email, password },
+      body: {
+        email,
+        password,
+        ...(inviteToken ? { invite_token: inviteToken } : {}),
+      },
     })
   },
 
@@ -368,6 +406,35 @@ export const api = {
       `/v1/projects/${projectId}/workers${query}`,
       { token },
     )
+  },
+
+  workerPoolUsage(token: string, projectId: string) {
+    return request<{ usage: WorkerPoolUsage }>(
+      `/v1/projects/${projectId}/worker-pools/usage`,
+      { token },
+    )
+  },
+
+  createInvite(
+    token: string,
+    input: { email?: string; role?: "user" | "admin"; expires_in_hours?: number },
+  ) {
+    return request<CreatedInvite>("/v1/admin/invites", {
+      method: "POST",
+      token,
+      body: input,
+    })
+  },
+
+  listInvites(token: string) {
+    return request<{ invites: Invite[] }>("/v1/admin/invites", { token })
+  },
+
+  revokeInvite(token: string, inviteId: string) {
+    return request<void>(`/v1/admin/invites/${inviteId}`, {
+      method: "DELETE",
+      token,
+    })
   },
 
   rotateWorkerToken(token: string, projectId: string, tokenId: string) {

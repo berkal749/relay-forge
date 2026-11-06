@@ -1,0 +1,120 @@
+# Production overlay. Use:
+#
+#   docker compose -f compose.yaml -f compose.production.yaml up -d --build
+#
+# Caddy terminates TLS (set SITE_ADDRESS to your domain; Caddy obtains a
+# certificate automatically) and serves the dashboard. Only Caddy publishes host
+# ports. PostgreSQL and the API stay on the private Compose network.
+
+services:
+  postgres:
+    ports: !reset []
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  api:
+    ports: !reset []
+    environment:
+      APP_ENV: production
+      REGISTRATION_MODE: ${REGISTRATION_MODE:-invite}
+      TRUST_PROXY_HEADERS: "true"
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+      INVITE_TTL: ${INVITE_TTL:-168h}
+      MAX_PROJECTS_PER_USER: ${MAX_PROJECTS_PER_USER:-5}
+      MAX_WORKER_POOLS_PER_PROJECT: ${MAX_WORKER_POOLS_PER_PROJECT:-10}
+      MAX_ACTIVE_POOLS_PER_PROJECT: ${MAX_ACTIVE_POOLS_PER_PROJECT:-5}
+      MAX_WORKER_CONCURRENCY_PER_PROJECT: ${MAX_WORKER_CONCURRENCY_PER_PROJECT:-50}
+      MAX_QUEUED_JOBS_PER_PROJECT: ${MAX_QUEUED_JOBS_PER_PROJECT:-100000}
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 512m
+    cpus: "1.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  supervisor:
+    environment:
+      APP_ENV: production
+      WORKER_TOKEN_PEPPER: ${WORKER_TOKEN_PEPPER:?WORKER_TOKEN_PEPPER is required}
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 512m
+    cpus: "1.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  worker:
+    environment:
+      APP_ENV: production
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 512m
+    cpus: "1.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    restart: unless-stopped
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-localhost}
+    ports:
+      - "80:8080"
+      - "443:8443"
+    networks:
+      - internal
+      - public
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:2019/config/ >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    cpus: "0.5"
+    depends_on:
+      api:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  internal:
+    internal: true

@@ -14,7 +14,7 @@ import (
 const createUser = `-- name: CreateUser :one
 INSERT INTO users (email, password_hash)
 VALUES ($1, $2)
-RETURNING id, email, password_hash, created_at
+RETURNING id, email, password_hash, created_at, role
 `
 
 type CreateUserParams struct {
@@ -30,12 +30,38 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		&i.Email,
 		&i.PasswordHash,
 		&i.CreatedAt,
+		&i.Role,
+	)
+	return i, err
+}
+
+const createUserWithRole = `-- name: CreateUserWithRole :one
+INSERT INTO users (email, password_hash, role)
+VALUES ($1, $2, $3)
+RETURNING id, email, password_hash, created_at, role
+`
+
+type CreateUserWithRoleParams struct {
+	Email        string `json:"email"`
+	PasswordHash string `json:"password_hash"`
+	Role         string `json:"role"`
+}
+
+func (q *Queries) CreateUserWithRole(ctx context.Context, arg CreateUserWithRoleParams) (User, error) {
+	row := q.db.QueryRow(ctx, createUserWithRole, arg.Email, arg.PasswordHash, arg.Role)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.PasswordHash,
+		&i.CreatedAt,
+		&i.Role,
 	)
 	return i, err
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, email, password_hash, created_at FROM users WHERE email = $1
+SELECT id, email, password_hash, created_at, role FROM users WHERE email = $1
 `
 
 func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error) {
@@ -46,12 +72,13 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 		&i.Email,
 		&i.PasswordHash,
 		&i.CreatedAt,
+		&i.Role,
 	)
 	return i, err
 }
 
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, email, password_hash, created_at FROM users WHERE id = $1
+SELECT id, email, password_hash, created_at, role FROM users WHERE id = $1
 `
 
 func (q *Queries) GetUserByID(ctx context.Context, id uuid.UUID) (User, error) {
@@ -62,6 +89,29 @@ func (q *Queries) GetUserByID(ctx context.Context, id uuid.UUID) (User, error) {
 		&i.Email,
 		&i.PasswordHash,
 		&i.CreatedAt,
+		&i.Role,
+	)
+	return i, err
+}
+
+const setUserRole = `-- name: SetUserRole :one
+UPDATE users SET role = $2 WHERE id = $1 RETURNING id, email, password_hash, created_at, role
+`
+
+type SetUserRoleParams struct {
+	ID   uuid.UUID `json:"id"`
+	Role string    `json:"role"`
+}
+
+func (q *Queries) SetUserRole(ctx context.Context, arg SetUserRoleParams) (User, error) {
+	row := q.db.QueryRow(ctx, setUserRole, arg.ID, arg.Role)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.PasswordHash,
+		&i.CreatedAt,
+		&i.Role,
 	)
 	return i, err
 }

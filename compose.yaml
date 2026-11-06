@@ -5,11 +5,13 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-relayforge}
       POSTGRES_USER: ${POSTGRES_USER:-relayforge}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-relayforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     ports:
       - "${POSTGRES_PORT:-5435}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    networks:
+      - internal
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
@@ -22,11 +24,11 @@ services:
       context: .
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER:-relayforge}:${POSTGRES_PASSWORD:-relayforge}@postgres:5432/${POSTGRES_DB:-relayforge}?sslmode=disable
+      DATABASE_URL: postgres://${POSTGRES_USER:-relayforge}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-relayforge}?sslmode=disable
       APP_ENV: ${APP_ENV:-development}
       HTTP_ADDR: ":8080"
       SESSION_TTL: ${SESSION_TTL:-720h}
-      API_KEY_PEPPER: ${API_KEY_PEPPER:-relayforge-development-pepper}
+      API_KEY_PEPPER: ${API_KEY_PEPPER:?API_KEY_PEPPER is required}
       WORKER_TOKEN_PEPPER: ${WORKER_TOKEN_PEPPER:-}
       RATE_LIMIT_AUTH_PER_MINUTE: ${RATE_LIMIT_AUTH_PER_MINUTE:-20}
       RATE_LIMIT_API_PER_MINUTE: ${RATE_LIMIT_API_PER_MINUTE:-600}
@@ -40,6 +42,16 @@ services:
       TOKEN_ROTATION_GRACE: ${TOKEN_ROTATION_GRACE:-24h}
       TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-false}
       WORKER_MTLS_HEADER: ${WORKER_MTLS_HEADER:-}
+      REGISTRATION_MODE: ${REGISTRATION_MODE:-open}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+      INVITE_TTL: ${INVITE_TTL:-168h}
+      MAX_PROJECTS_PER_USER: ${MAX_PROJECTS_PER_USER:-5}
+      MAX_WORKER_POOLS_PER_PROJECT: ${MAX_WORKER_POOLS_PER_PROJECT:-10}
+      MAX_ACTIVE_POOLS_PER_PROJECT: ${MAX_ACTIVE_POOLS_PER_PROJECT:-5}
+      MAX_WORKER_CONCURRENCY_PER_PROJECT: ${MAX_WORKER_CONCURRENCY_PER_PROJECT:-50}
+      MAX_QUEUED_JOBS_PER_PROJECT: ${MAX_QUEUED_JOBS_PER_PROJECT:-100000}
+      METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      METRICS_ADDR: ":9090"
     ports:
       - "${API_PORT:-8080}:8080"
     healthcheck:
@@ -48,6 +60,8 @@ services:
       timeout: 5s
       retries: 10
       start_period: 5s
+    networks:
+      - internal
     depends_on:
       postgres:
         condition: service_healthy
@@ -75,8 +89,10 @@ services:
       RETRY_MAX_DELAY: ${RETRY_MAX_DELAY:-5m}
       WORKER_SECRETS_FILE: ${WORKER_SECRETS_FILE:-}
       WORKER_EGRESS_ALLOWLIST: ${WORKER_EGRESS_ALLOWLIST:-}
-    volumes:
-      - worker_state:/var/lib/relayforge
+    tmpfs:
+      - /var/lib/relayforge
+    networks:
+      - internal
     depends_on:
       api:
         condition: service_healthy
@@ -88,8 +104,8 @@ services:
     profiles: ["supervisor"]
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER:-relayforge}:${POSTGRES_PASSWORD:-relayforge}@postgres:5432/${POSTGRES_DB:-relayforge}?sslmode=disable
-      API_KEY_PEPPER: ${API_KEY_PEPPER:-relayforge-development-pepper}
+      DATABASE_URL: postgres://${POSTGRES_USER:-relayforge}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-relayforge}?sslmode=disable
+      API_KEY_PEPPER: ${API_KEY_PEPPER:?API_KEY_PEPPER is required}
       WORKER_TOKEN_PEPPER: ${WORKER_TOKEN_PEPPER:-}
       RELAYFORGE_API_URL: http://api:8080
       WORKER_ENROLLMENT_TTL: ${WORKER_ENROLLMENT_TTL:-15m}
@@ -103,8 +119,10 @@ services:
       WORKER_CLEANUP_INTERVAL: ${WORKER_CLEANUP_INTERVAL:-1h}
       RETRY_BASE_DELAY: ${RETRY_BASE_DELAY:-5s}
       RETRY_MAX_DELAY: ${RETRY_MAX_DELAY:-5m}
-    volumes:
-      - supervisor_state:/var/lib/relayforge
+    tmpfs:
+      - /var/lib/relayforge
+    networks:
+      - internal
     depends_on:
       postgres:
         condition: service_healthy
@@ -113,5 +131,7 @@ services:
 
 volumes:
   postgres_data:
-  worker_state:
-  supervisor_state:
+
+networks:
+  internal:
+  public:

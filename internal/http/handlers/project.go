@@ -223,6 +223,8 @@ func writeProjectError(w http.ResponseWriter, operation string, err error) {
 		httpx.WriteError(w, http.StatusBadRequest, "rate_limit_per_minute must be between 0 and 1000000")
 	case errors.Is(err, project.ErrInvalidJobTimeout):
 		httpx.WriteError(w, http.StatusBadRequest, "default_job_timeout_seconds must be between 0 and 86400")
+	case errors.Is(err, project.ErrProjectLimit):
+		httpx.WriteError(w, http.StatusForbidden, "project limit reached for this account")
 	case errors.Is(err, project.ErrProjectNotFound):
 		httpx.WriteError(w, http.StatusNotFound, "project not found")
 	default:

@@ -26,6 +26,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if err := cfg.ValidateWorker(); err != nil {
+		return err
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -55,6 +58,9 @@ func run() error {
 		TokenDir:      cfg.SupervisorTokenDir,
 		APIBaseURL:    cfg.APIBaseURL,
 		EnrollmentTTL: cfg.WorkerEnrollmentTTL,
+
+		MaxActivePoolsPerProject: cfg.MaxActivePoolsPerProject,
+		MaxConcurrencyPerProject: cfg.MaxWorkerConcurrencyPerProject,
 	})
 
 	return runner.Run(ctx)

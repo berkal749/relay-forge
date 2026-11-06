@@ -38,3 +38,8 @@ WHERE status = 'online'
       last_heartbeat_at IS NULL
       OR last_heartbeat_at < now() - make_interval(secs => sqlc.arg('stale_seconds')::int)
   );
+
+-- name: OnlineWorkersByProject :many
+SELECT project_id, count(*) AS online FROM workers
+WHERE status = 'online'
+GROUP BY project_id;

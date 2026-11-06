@@ -36,11 +36,18 @@ var (
 	ErrProjectNotFound       = errors.New("project not found")
 	ErrInvalidIdempotencyKey = errors.New("idempotency key must be between 1 and 255 printable characters")
 	ErrIdempotencyConflict   = errors.New("idempotency key was already used with a different request")
+	ErrQueueLimit            = errors.New("queued job limit reached for this project")
 )
+
+// Limits caps per-project job volume. A zero value means unlimited.
+type Limits struct {
+	MaxQueuedJobsPerProject int
+}
 
 type Service struct {
 	pool    *pgxpool.Pool
 	queries *db.Queries
+	limits  Limits
 }
 
 type SubmitInput struct {
@@ -59,10 +66,11 @@ type SubmitResult struct {
 	Replayed bool
 }
 
-func NewService(pool *pgxpool.Pool) *Service {
+func NewService(pool *pgxpool.Pool, limits Limits) *Service {
 	return &Service{
 		pool:    pool,
 		queries: db.New(pool),
+		limits:  limits,
 	}
 }
 
@@ -101,6 +109,16 @@ func (s *Service) Submit(ctx context.Context, input SubmitInput) (SubmitResult, 
 	queueName, priority, maxAttempts, err := resolveSubmitDefaults(settings, input)
 	if err != nil {
 		return SubmitResult{}, err
+	}
+
+	if s.limits.MaxQueuedJobsPerProject > 0 {
+		queued, err := s.queries.CountQueuedJobsByProject(ctx, input.ProjectID)
+		if err != nil {
+			return SubmitResult{}, fmt.Errorf("count queued jobs: %w", err)
+		}
+		if queued >= int64(s.limits.MaxQueuedJobsPerProject) {
+			return SubmitResult{}, ErrQueueLimit
+		}
 	}
 
 	now := time.Now()

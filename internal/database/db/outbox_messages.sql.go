@@ -53,6 +53,18 @@ func (q *Queries) ClaimOutboxMessages(ctx context.Context, limit int32) ([]Outbo
 	return items, nil
 }
 
+const countOutboxBacklog = `-- name: CountOutboxBacklog :one
+SELECT count(*) FROM outbox_messages
+WHERE status IN ('pending', 'processing')
+`
+
+func (q *Queries) CountOutboxBacklog(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countOutboxBacklog)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createOutboxMessage = `-- name: CreateOutboxMessage :one
 INSERT INTO outbox_messages (job_id)
 VALUES ($1)

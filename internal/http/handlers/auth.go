@@ -17,8 +17,9 @@ type AuthHandler struct {
 }
 
 type registerRequest struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
+	Email       string `json:"email"`
+	Password    string `json:"password"`
+	InviteToken string `json:"invite_token"`
 }
 
 type loginRequest struct {
@@ -29,6 +30,7 @@ type loginRequest struct {
 type userResponse struct {
 	ID        string    `json:"id"`
 	Email     string    `json:"email"`
+	Role      string    `json:"role"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -50,7 +52,7 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := h.service.Register(r.Context(), request.Email, request.Password)
+	user, err := h.service.Register(r.Context(), request.Email, request.Password, request.InviteToken)
 	if err != nil {
 		writeAuthError(w, "register user", err)
 		return
@@ -58,6 +60,14 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 
 	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
 		"user": toUserResponse(user),
+	})
+}
+
+// Config exposes non-sensitive registration settings so the dashboard can show
+// the invite field and disable the form when registration is closed.
+func (h *AuthHandler) Config(w http.ResponseWriter, r *http.Request) {
+	httpx.WriteJSON(w, http.StatusOK, map[string]string{
+		"registration_mode": h.service.RegistrationMode(),
 	})
 }
 
@@ -115,6 +125,7 @@ func toUserResponse(user db.User) userResponse {
 	return userResponse{
 		ID:        user.ID.String(),
 		Email:     user.Email,
+		Role:      user.Role,
 		CreatedAt: user.CreatedAt,
 	}
 }
@@ -133,6 +144,14 @@ func writeAuthError(w http.ResponseWriter, operation string, err error) {
 		httpx.WriteError(w, http.StatusUnauthorized, "invalid session")
 	case errors.Is(err, auth.ErrSessionExpired):
 		httpx.WriteError(w, http.StatusUnauthorized, "session expired")
+	case errors.Is(err, auth.ErrRegistrationClosed), errors.Is(err, auth.ErrRegistrationDisabled):
+		httpx.WriteError(w, http.StatusForbidden, "registration is closed")
+	case errors.Is(err, auth.ErrInviteRequired):
+		httpx.WriteError(w, http.StatusForbidden, "an invite token is required to register")
+	case errors.Is(err, auth.ErrInviteInvalid), errors.Is(err, auth.ErrInviteExpired):
+		httpx.WriteError(w, http.StatusForbidden, "invite token is invalid or expired")
+	case errors.Is(err, auth.ErrInviteEmailMismatch):
+		httpx.WriteError(w, http.StatusForbidden, "invite token was issued for a different email")
 	default:
 		slog.Error(operation, "error", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "internal server error")

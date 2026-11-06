@@ -29,3 +29,7 @@ UPDATE outbox_messages
 SET status = 'processed', processed_at = now()
 WHERE id = $1
 RETURNING *;
+
+-- name: CountOutboxBacklog :one
+SELECT count(*) FROM outbox_messages
+WHERE status IN ('pending', 'processing');

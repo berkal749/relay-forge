@@ -332,6 +332,8 @@ func writeJobError(w http.ResponseWriter, operation string, err error) {
 		httpx.WriteError(w, http.StatusBadRequest, "Idempotency-Key must be between 1 and 255 printable characters")
 	case errors.Is(err, job.ErrIdempotencyConflict):
 		httpx.WriteError(w, http.StatusConflict, "idempotency key was already used with a different request")
+	case errors.Is(err, job.ErrQueueLimit):
+		httpx.WriteError(w, http.StatusTooManyRequests, "queued job limit reached for this project")
 	default:
 		slog.Error(operation, "error", err)
 		httpx.WriteError(w, http.StatusInternalServerError, "internal server error")

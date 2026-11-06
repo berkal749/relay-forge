@@ -14,9 +14,11 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 
 	"relayforge/internal/database/db"
+	"relayforge/internal/invite"
 )
 
 const (
@@ -24,20 +26,39 @@ const (
 	maxPasswordLength = 72
 	maxEmailLength    = 254
 	sessionTokenBytes = 32
+
+	RegistrationOpen   = "open"
+	RegistrationInvite = "invite"
+	RegistrationClosed = "closed"
 )
 
 var (
-	ErrInvalidEmail       = errors.New("invalid email")
-	ErrWeakPassword       = errors.New("weak password")
-	ErrEmailTaken         = errors.New("email already registered")
-	ErrInvalidCredentials = errors.New("invalid email or password")
-	ErrInvalidSession     = errors.New("invalid session")
-	ErrSessionExpired     = errors.New("session expired")
+	ErrInvalidEmail         = errors.New("invalid email")
+	ErrWeakPassword         = errors.New("weak password")
+	ErrEmailTaken           = errors.New("email already registered")
+	ErrInvalidCredentials   = errors.New("invalid email or password")
+	ErrInvalidSession       = errors.New("invalid session")
+	ErrSessionExpired       = errors.New("session expired")
+	ErrRegistrationClosed   = errors.New("registration is closed")
+	ErrInviteRequired       = errors.New("an invite token is required to register")
+	ErrInviteInvalid        = errors.New("invite token is invalid or already used")
+	ErrInviteExpired        = errors.New("invite token has expired")
+	ErrInviteEmailMismatch  = errors.New("invite token was issued for a different email")
+	ErrRegistrationDisabled = errors.New("registration is not enabled")
 )
 
 type Service struct {
-	queries    *db.Queries
-	sessionTTL time.Duration
+	queries             *db.Queries
+	pool                *pgxpool.Pool
+	sessionTTL          time.Duration
+	registrationMode    string
+	bootstrapAdminEmail string
+}
+
+type Options struct {
+	Pool                *pgxpool.Pool
+	RegistrationMode    string
+	BootstrapAdminEmail string
 }
 
 type Session struct {
@@ -46,14 +67,25 @@ type Session struct {
 	User      db.User
 }
 
-func NewService(queries *db.Queries, sessionTTL time.Duration) *Service {
+func NewService(queries *db.Queries, sessionTTL time.Duration, options Options) *Service {
+	mode := strings.ToLower(strings.TrimSpace(options.RegistrationMode))
+	if mode == "" {
+		mode = RegistrationOpen
+	}
 	return &Service{
-		queries:    queries,
-		sessionTTL: sessionTTL,
+		queries:             queries,
+		pool:                options.Pool,
+		sessionTTL:          sessionTTL,
+		registrationMode:    mode,
+		bootstrapAdminEmail: strings.ToLower(strings.TrimSpace(options.BootstrapAdminEmail)),
 	}
 }
 
-func (s *Service) Register(ctx context.Context, email, password string) (db.User, error) {
+func (s *Service) RegistrationMode() string {
+	return s.registrationMode
+}
+
+func (s *Service) Register(ctx context.Context, email, password, inviteToken string) (db.User, error) {
 	email, err := normalizeEmail(email)
 	if err != nil {
 		return db.User{}, err
@@ -62,14 +94,68 @@ func (s *Service) Register(ctx context.Context, email, password string) (db.User
 		return db.User{}, err
 	}
 
+	bootstrapAdmin := s.bootstrapAdminEmail != "" && email == s.bootstrapAdminEmail
+
+	switch s.registrationMode {
+	case RegistrationClosed:
+		return db.User{}, ErrRegistrationClosed
+	case RegistrationInvite:
+		if !bootstrapAdmin && strings.TrimSpace(inviteToken) == "" {
+			return db.User{}, ErrInviteRequired
+		}
+	case RegistrationOpen:
+		// Open registration is intended for local development only.
+	default:
+		return db.User{}, ErrRegistrationDisabled
+	}
+
 	passwordHash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return db.User{}, fmt.Errorf("hash password: %w", err)
 	}
 
-	user, err := s.queries.CreateUser(ctx, db.CreateUserParams{
+	if s.pool == nil {
+		return s.registerWithoutTransaction(ctx, email, string(passwordHash), inviteToken, bootstrapAdmin)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return db.User{}, fmt.Errorf("begin registration transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	queries := db.New(tx)
+	role := invite.RoleUser
+	if bootstrapAdmin {
+		role = invite.RoleAdmin
+	}
+
+	var pendingInvite *db.Invite
+	if s.registrationMode == RegistrationInvite && !bootstrapAdmin {
+		found, err := queries.GetInviteByTokenHashForUpdate(ctx, invite.HashToken(inviteToken))
+		if errors.Is(err, pgx.ErrNoRows) {
+			return db.User{}, ErrInviteInvalid
+		}
+		if err != nil {
+			return db.User{}, fmt.Errorf("get invite: %w", err)
+		}
+		if found.ConsumedAt != nil {
+			return db.User{}, ErrInviteInvalid
+		}
+		if !found.ExpiresAt.After(time.Now()) {
+			return db.User{}, ErrInviteExpired
+		}
+		if found.Email != nil && *found.Email != email {
+			return db.User{}, ErrInviteEmailMismatch
+		}
+		role = found.Role
+		pendingInvite = &found
+	}
+
+	user, err := queries.CreateUserWithRole(ctx, db.CreateUserWithRoleParams{
 		Email:        email,
 		PasswordHash: string(passwordHash),
+		Role:         role,
 	})
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -79,6 +165,61 @@ func (s *Service) Register(ctx context.Context, email, password string) (db.User
 		return db.User{}, fmt.Errorf("create user: %w", err)
 	}
 
+	if pendingInvite != nil {
+		if _, err := queries.ConsumeInvite(ctx, db.ConsumeInviteParams{
+			ID:         pendingInvite.ID,
+			ConsumedBy: &user.ID,
+		}); err != nil {
+			return db.User{}, fmt.Errorf("consume invite: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return db.User{}, fmt.Errorf("commit registration transaction: %w", err)
+	}
+
+	return user, nil
+}
+
+// registerWithoutTransaction supports unit tests and non-transactional callers.
+// The API always supplies a pool, which keeps user creation and invite
+// consumption atomic.
+func (s *Service) registerWithoutTransaction(ctx context.Context, email, passwordHash, inviteToken string, bootstrapAdmin bool) (db.User, error) {
+	if s.registrationMode == RegistrationInvite && !bootstrapAdmin {
+		found, err := s.queries.GetInviteByTokenHash(ctx, invite.HashToken(inviteToken))
+		if errors.Is(err, pgx.ErrNoRows) {
+			return db.User{}, ErrInviteInvalid
+		}
+		if err != nil {
+			return db.User{}, fmt.Errorf("get invite: %w", err)
+		}
+		if found.ConsumedAt != nil {
+			return db.User{}, ErrInviteInvalid
+		}
+		if !found.ExpiresAt.After(time.Now()) {
+			return db.User{}, ErrInviteExpired
+		}
+		if found.Email != nil && *found.Email != email {
+			return db.User{}, ErrInviteEmailMismatch
+		}
+	}
+
+	role := invite.RoleUser
+	if bootstrapAdmin {
+		role = invite.RoleAdmin
+	}
+	user, err := s.queries.CreateUserWithRole(ctx, db.CreateUserWithRoleParams{
+		Email:        email,
+		PasswordHash: passwordHash,
+		Role:         role,
+	})
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return db.User{}, ErrEmailTaken
+		}
+		return db.User{}, fmt.Errorf("create user: %w", err)
+	}
 	return user, nil
 }
 

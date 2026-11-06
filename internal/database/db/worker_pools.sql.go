@@ -11,6 +11,47 @@ import (
 	"github.com/google/uuid"
 )
 
+const countActiveWorkerPoolsByProject = `-- name: CountActiveWorkerPoolsByProject :one
+SELECT count(*) FROM worker_pools
+WHERE project_id = $1 AND status = 'active'
+`
+
+func (q *Queries) CountActiveWorkerPoolsByProject(ctx context.Context, projectID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countActiveWorkerPoolsByProject, projectID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countActiveWorkerPoolsByProjectExcluding = `-- name: CountActiveWorkerPoolsByProjectExcluding :one
+SELECT count(*) FROM worker_pools
+WHERE project_id = $1 AND status = 'active' AND id <> $2
+`
+
+type CountActiveWorkerPoolsByProjectExcludingParams struct {
+	ProjectID uuid.UUID `json:"project_id"`
+	ID        uuid.UUID `json:"id"`
+}
+
+func (q *Queries) CountActiveWorkerPoolsByProjectExcluding(ctx context.Context, arg CountActiveWorkerPoolsByProjectExcludingParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countActiveWorkerPoolsByProjectExcluding, arg.ProjectID, arg.ID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const countWorkerPoolsByProject = `-- name: CountWorkerPoolsByProject :one
+SELECT count(*) FROM worker_pools
+WHERE project_id = $1
+`
+
+func (q *Queries) CountWorkerPoolsByProject(ctx context.Context, projectID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countWorkerPoolsByProject, projectID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createWorkerPool = `-- name: CreateWorkerPool :one
 INSERT INTO worker_pools (
     project_id,
@@ -209,6 +250,35 @@ func (q *Queries) ListWorkerPoolsByProject(ctx context.Context, projectID uuid.U
 		return nil, err
 	}
 	return items, nil
+}
+
+const sumWorkerConcurrencyByProject = `-- name: SumWorkerConcurrencyByProject :one
+SELECT COALESCE(SUM(concurrency), 0)::bigint FROM worker_pools
+WHERE project_id = $1 AND status = 'active'
+`
+
+func (q *Queries) SumWorkerConcurrencyByProject(ctx context.Context, projectID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, sumWorkerConcurrencyByProject, projectID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const sumWorkerConcurrencyByProjectExcluding = `-- name: SumWorkerConcurrencyByProjectExcluding :one
+SELECT COALESCE(SUM(concurrency), 0)::bigint FROM worker_pools
+WHERE project_id = $1 AND status = 'active' AND id <> $2
+`
+
+type SumWorkerConcurrencyByProjectExcludingParams struct {
+	ProjectID uuid.UUID `json:"project_id"`
+	ID        uuid.UUID `json:"id"`
+}
+
+func (q *Queries) SumWorkerConcurrencyByProjectExcluding(ctx context.Context, arg SumWorkerConcurrencyByProjectExcludingParams) (int64, error) {
+	row := q.db.QueryRow(ctx, sumWorkerConcurrencyByProjectExcluding, arg.ProjectID, arg.ID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const updateWorkerPool = `-- name: UpdateWorkerPool :one

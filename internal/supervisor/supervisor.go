@@ -30,6 +30,12 @@ type Config struct {
 	TokenDir      string
 	APIBaseURL    string
 	EnrollmentTTL time.Duration
+
+	// Defensive per-project caps. Validation normally enforces these, but the
+	// supervisor applies them again so a direct database change cannot make it
+	// over-spawn workers.
+	MaxActivePoolsPerProject int
+	MaxConcurrencyPerProject int
 }
 
 type child struct {
@@ -85,8 +91,25 @@ func (s *Supervisor) reconcile(ctx context.Context) {
 	}
 
 	active := make(map[uuid.UUID]db.WorkerPool, len(pools))
+	activePools := make(map[uuid.UUID]int)
+	concurrency := make(map[uuid.UUID]int64)
 	for _, pool := range pools {
+		if s.config.MaxActivePoolsPerProject > 0 && activePools[pool.ProjectID] >= s.config.MaxActivePoolsPerProject {
+			slog.Warn("skipping worker pool over active-pool quota",
+				"pool_id", pool.ID, "project_id", pool.ProjectID,
+				"limit", s.config.MaxActivePoolsPerProject)
+			continue
+		}
+		if s.config.MaxConcurrencyPerProject > 0 &&
+			concurrency[pool.ProjectID]+int64(pool.Concurrency) > int64(s.config.MaxConcurrencyPerProject) {
+			slog.Warn("skipping worker pool over concurrency quota",
+				"pool_id", pool.ID, "project_id", pool.ProjectID,
+				"limit", s.config.MaxConcurrencyPerProject)
+			continue
+		}
 		active[pool.ID] = pool
+		activePools[pool.ProjectID]++
+		concurrency[pool.ProjectID] += int64(pool.Concurrency)
 	}
 
 	s.mu.Lock()

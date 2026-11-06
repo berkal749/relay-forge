@@ -4,6 +4,7 @@ import { AppShell } from "@/components/app-shell"
 import { ProtectedRoute, PublicOnlyRoute } from "@/components/route-guards"
 import { Toaster } from "@/components/ui/sonner"
 import { AuthProvider } from "@/lib/auth"
+import { AdminInvitesPage } from "@/pages/admin-invites"
 import { JobPage } from "@/pages/job"
 import { LoginPage } from "@/pages/login"
 import { ProjectPage } from "@/pages/project"
@@ -34,6 +35,7 @@ export default function App() {
             <Route element={<ProtectedRoute />}>
               <Route element={<AppShell />}>
                 <Route index element={<ProjectsPage />} />
+                <Route path="/admin/invites" element={<AdminInvitesPage />} />
                 <Route path="/projects/:projectId" element={<ProjectPage />} />
                 <Route
                   path="/projects/:projectId/jobs/:jobId"

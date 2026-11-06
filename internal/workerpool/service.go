@@ -50,7 +50,17 @@ var (
 	ErrEmptyUpdate         = errors.New("update must contain at least one field")
 	ErrPoolNotFound        = errors.New("worker pool not found")
 	ErrNameTaken           = errors.New("a worker pool with that name already exists")
+	ErrPoolLimit           = errors.New("worker pool limit reached for this project")
+	ErrActivePoolLimit     = errors.New("active worker pool limit reached for this project")
+	ErrConcurrencyLimit    = errors.New("worker concurrency limit reached for this project")
 )
+
+// Limits caps per-project worker resources. A zero value means unlimited.
+type Limits struct {
+	MaxPoolsPerProject       int
+	MaxActivePoolsPerProject int
+	MaxConcurrencyPerProject int
+}
 
 type CreateInput struct {
 	Name                  string
@@ -94,10 +104,121 @@ type Service struct {
 	queries  *db.Queries
 	projects *project.Service
 	tokens   *workertoken.Service
+	limits   Limits
 }
 
-func NewService(queries *db.Queries, projects *project.Service, tokens *workertoken.Service) *Service {
-	return &Service{queries: queries, projects: projects, tokens: tokens}
+func NewService(queries *db.Queries, projects *project.Service, tokens *workertoken.Service, limits Limits) *Service {
+	return &Service{queries: queries, projects: projects, tokens: tokens, limits: limits}
+}
+
+// Usage reports current project quota consumption for the dashboard.
+type Usage struct {
+	PoolCount      int64 `json:"pool_count"`
+	MaxPools       int   `json:"max_pools"`
+	ActiveCount    int64 `json:"active_pool_count"`
+	MaxActivePools int   `json:"max_active_pools"`
+	Concurrency    int64 `json:"concurrency"`
+	MaxConcurrency int   `json:"max_concurrency"`
+}
+
+func (s *Service) Usage(ctx context.Context, userID, projectID uuid.UUID) (Usage, error) {
+	if _, err := s.projects.GetOwned(ctx, userID, projectID); err != nil {
+		return Usage{}, err
+	}
+	pools, err := s.queries.CountWorkerPoolsByProject(ctx, projectID)
+	if err != nil {
+		return Usage{}, fmt.Errorf("count worker pools: %w", err)
+	}
+	active, err := s.queries.CountActiveWorkerPoolsByProject(ctx, projectID)
+	if err != nil {
+		return Usage{}, fmt.Errorf("count active worker pools: %w", err)
+	}
+	concurrency, err := s.queries.SumWorkerConcurrencyByProject(ctx, projectID)
+	if err != nil {
+		return Usage{}, fmt.Errorf("sum worker concurrency: %w", err)
+	}
+	return Usage{
+		PoolCount:      pools,
+		MaxPools:       s.limits.MaxPoolsPerProject,
+		ActiveCount:    active,
+		MaxActivePools: s.limits.MaxActivePoolsPerProject,
+		Concurrency:    concurrency,
+		MaxConcurrency: s.limits.MaxConcurrencyPerProject,
+	}, nil
+}
+
+func (s *Service) checkUpdateQuota(ctx context.Context, projectID uuid.UUID, existing db.WorkerPool, input UpdateInput) error {
+	newStatus := existing.Status
+	if input.Status != nil {
+		newStatus = strings.TrimSpace(*input.Status)
+	}
+	if newStatus != StatusActive {
+		return nil
+	}
+
+	if s.limits.MaxActivePoolsPerProject > 0 && existing.Status != StatusActive {
+		count, err := s.queries.CountActiveWorkerPoolsByProjectExcluding(ctx, db.CountActiveWorkerPoolsByProjectExcludingParams{
+			ProjectID: projectID,
+			ID:        existing.ID,
+		})
+		if err != nil {
+			return fmt.Errorf("count active worker pools: %w", err)
+		}
+		if count >= int64(s.limits.MaxActivePoolsPerProject) {
+			return ErrActivePoolLimit
+		}
+	}
+
+	if s.limits.MaxConcurrencyPerProject > 0 {
+		newConcurrency := existing.Concurrency
+		if input.Concurrency != nil {
+			newConcurrency = *input.Concurrency
+		}
+		if newConcurrency != existing.Concurrency {
+			total, err := s.queries.SumWorkerConcurrencyByProjectExcluding(ctx, db.SumWorkerConcurrencyByProjectExcludingParams{
+				ProjectID: projectID,
+				ID:        existing.ID,
+			})
+			if err != nil {
+				return fmt.Errorf("sum worker concurrency: %w", err)
+			}
+			if total+int64(newConcurrency) > int64(s.limits.MaxConcurrencyPerProject) {
+				return ErrConcurrencyLimit
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Service) checkCreateQuota(ctx context.Context, projectID uuid.UUID, concurrency int32) error {
+	if s.limits.MaxPoolsPerProject > 0 {
+		count, err := s.queries.CountWorkerPoolsByProject(ctx, projectID)
+		if err != nil {
+			return fmt.Errorf("count worker pools: %w", err)
+		}
+		if count >= int64(s.limits.MaxPoolsPerProject) {
+			return ErrPoolLimit
+		}
+	}
+	if s.limits.MaxActivePoolsPerProject > 0 {
+		count, err := s.queries.CountActiveWorkerPoolsByProject(ctx, projectID)
+		if err != nil {
+			return fmt.Errorf("count active worker pools: %w", err)
+		}
+		if count >= int64(s.limits.MaxActivePoolsPerProject) {
+			return ErrActivePoolLimit
+		}
+	}
+	if s.limits.MaxConcurrencyPerProject > 0 {
+		total, err := s.queries.SumWorkerConcurrencyByProject(ctx, projectID)
+		if err != nil {
+			return fmt.Errorf("sum worker concurrency: %w", err)
+		}
+		if total+int64(concurrency) > int64(s.limits.MaxConcurrencyPerProject) {
+			return ErrConcurrencyLimit
+		}
+	}
+	return nil
 }
 
 func (s *Service) Create(ctx context.Context, userID, projectID uuid.UUID, input CreateInput) (db.WorkerPool, error) {
@@ -128,6 +249,9 @@ func (s *Service) Create(ctx context.Context, userID, projectID uuid.UUID, input
 	}
 
 	if _, err := s.projects.GetOwned(ctx, userID, projectID); err != nil {
+		return db.WorkerPool{}, err
+	}
+	if err := s.checkCreateQuota(ctx, projectID, input.Concurrency); err != nil {
 		return db.WorkerPool{}, err
 	}
 
@@ -273,6 +397,20 @@ func (s *Service) Update(ctx context.Context, userID, projectID, poolID uuid.UUI
 	}
 
 	if _, err := s.projects.GetOwned(ctx, userID, projectID); err != nil {
+		return db.WorkerPool{}, err
+	}
+
+	existing, err := s.queries.GetWorkerPool(ctx, db.GetWorkerPoolParams{
+		ID:        poolID,
+		ProjectID: projectID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return db.WorkerPool{}, ErrPoolNotFound
+	}
+	if err != nil {
+		return db.WorkerPool{}, fmt.Errorf("get worker pool: %w", err)
+	}
+	if err := s.checkUpdateQuota(ctx, projectID, existing, input); err != nil {
 		return db.WorkerPool{}, err
 	}
 

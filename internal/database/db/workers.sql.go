@@ -173,6 +173,37 @@ func (q *Queries) MarkWorkerOffline(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
+const onlineWorkersByProject = `-- name: OnlineWorkersByProject :many
+SELECT project_id, count(*) AS online FROM workers
+WHERE status = 'online'
+GROUP BY project_id
+`
+
+type OnlineWorkersByProjectRow struct {
+	ProjectID uuid.UUID `json:"project_id"`
+	Online    int64     `json:"online"`
+}
+
+func (q *Queries) OnlineWorkersByProject(ctx context.Context) ([]OnlineWorkersByProjectRow, error) {
+	rows, err := q.db.Query(ctx, onlineWorkersByProject)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []OnlineWorkersByProjectRow{}
+	for rows.Next() {
+		var i OnlineWorkersByProjectRow
+		if err := rows.Scan(&i.ProjectID, &i.Online); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const updateWorkerHeartbeat = `-- name: UpdateWorkerHeartbeat :one
 UPDATE workers
 SET status = 'online', last_heartbeat_at = now()

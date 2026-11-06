@@ -1,5 +1,5 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom"
-import { FolderKanban, LogOut, Workflow } from "lucide-react"
+import { FolderKanban, LogOut, Ticket, Workflow } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useAuth } from "@/lib/auth"
 import { cn } from "@/lib/utils"
@@ -43,6 +43,21 @@ export function AppShell() {
               <FolderKanban className="size-4" />
               Projects
             </NavLink>
+
+            {user?.role === "admin" && (
+              <NavLink
+                to="/admin/invites"
+                className={({ isActive }) =>
+                  cn(
+                    "hidden items-center gap-2 text-sm text-muted-foreground transition-colors hover:text-foreground sm:flex",
+                    isActive && "text-foreground",
+                  )
+                }
+              >
+                <Ticket className="size-4" />
+                Invites
+              </NavLink>
+            )}
           </div>
 
           <div className="flex items-center gap-3">

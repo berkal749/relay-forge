@@ -107,3 +107,12 @@ WHERE jobs.project_id = projects.id
   AND projects.job_retention_days > 0
   AND jobs.status IN ('succeeded', 'failed', 'cancelled')
   AND jobs.updated_at < now() - make_interval(days => projects.job_retention_days);
+
+-- name: CountQueuedJobsByProject :one
+SELECT count(*) FROM jobs
+WHERE project_id = $1 AND status IN ('pending', 'scheduled');
+
+-- name: QueueDepthByProject :many
+SELECT project_id, count(*) AS depth FROM jobs
+WHERE status IN ('pending', 'scheduled')
+GROUP BY project_id;

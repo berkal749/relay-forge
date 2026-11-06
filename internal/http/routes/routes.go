@@ -1,7 +1,9 @@
 package routes
 
 import (
+	"context"
 	"net/http"
+	"time"
 
 	"relayforge/internal/http/handlers"
 	"relayforge/internal/http/httpx"
@@ -10,6 +12,7 @@ import (
 
 type Dependencies struct {
 	Auth                     *handlers.AuthHandler
+	Invites                  *handlers.InviteHandler
 	Projects                 *handlers.ProjectHandler
 	APIKeys                  *handlers.APIKeyHandler
 	WorkerTokens             *handlers.WorkerTokenHandler
@@ -21,6 +24,7 @@ type Dependencies struct {
 	APIKeyAuthenticator      middleware.APIKeyAuthenticator
 	WorkerTokenAuthenticator middleware.WorkerTokenAuthenticator
 	RateLimits               middleware.RateLimiters
+	Ready                    func(ctx context.Context) error
 }
 
 func New(deps Dependencies) http.Handler {
@@ -29,6 +33,19 @@ func New(deps Dependencies) http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		if deps.Ready == nil {
+			httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := deps.Ready(ctx); err != nil {
+			httpx.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not ready"})
+			return
+		}
+		httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+	})
 
 	limitAuth := middleware.RateLimit(deps.RateLimits.Auth, middleware.RateLimitKeyByIP)
 	limitSession := middleware.RateLimit(deps.RateLimits.API, middleware.RateLimitKeyBySession)
@@ -36,14 +53,22 @@ func New(deps Dependencies) http.Handler {
 	limitSubmitSession := middleware.RateLimit(deps.RateLimits.JobSubmit, middleware.RateLimitKeyBySession)
 	limitSubmitAPIKey := middleware.RateLimit(deps.RateLimits.JobSubmit, middleware.RateLimitKeyByAPIKey)
 
+	mux.Handle("GET /v1/auth/config", limitAuth(http.HandlerFunc(deps.Auth.Config)))
 	mux.Handle("POST /v1/auth/register", limitAuth(http.HandlerFunc(deps.Auth.Register)))
 	mux.Handle("POST /v1/auth/login", limitAuth(http.HandlerFunc(deps.Auth.Login)))
 
 	requireSession := middleware.RequireAuth(deps.Authenticator)
+	requireAdmin := middleware.RequireAdmin
 	requireAPIKey := middleware.RequireAPIKey(deps.APIKeyAuthenticator)
 
 	mux.Handle("GET /v1/auth/me", requireSession(limitSession(http.HandlerFunc(deps.Auth.Me))))
 	mux.Handle("POST /v1/auth/logout", requireSession(limitSession(http.HandlerFunc(deps.Auth.Logout))))
+
+	if deps.Invites != nil {
+		mux.Handle("POST /v1/admin/invites", requireSession(limitSession(requireAdmin(http.HandlerFunc(deps.Invites.Create)))))
+		mux.Handle("GET /v1/admin/invites", requireSession(limitSession(requireAdmin(http.HandlerFunc(deps.Invites.List)))))
+		mux.Handle("DELETE /v1/admin/invites/{id}", requireSession(limitSession(requireAdmin(http.HandlerFunc(deps.Invites.Revoke)))))
+	}
 
 	mux.Handle("POST /v1/projects", requireSession(limitSession(http.HandlerFunc(deps.Projects.Create))))
 	mux.Handle("GET /v1/projects", requireSession(limitSession(http.HandlerFunc(deps.Projects.List))))
@@ -63,6 +88,7 @@ func New(deps Dependencies) http.Handler {
 	mux.Handle("POST /v1/projects/{projectID}/worker-pools", requireSession(limitSession(http.HandlerFunc(deps.WorkerPools.Create))))
 	mux.Handle("GET /v1/projects/{projectID}/worker-pools", requireSession(limitSession(http.HandlerFunc(deps.WorkerPools.List))))
 	mux.Handle("GET /v1/projects/{projectID}/worker-pools/stats", requireSession(limitSession(http.HandlerFunc(deps.WorkerPools.Stats))))
+	mux.Handle("GET /v1/projects/{projectID}/worker-pools/usage", requireSession(limitSession(http.HandlerFunc(deps.WorkerPools.Usage))))
 	mux.Handle("PATCH /v1/projects/{projectID}/worker-pools/{poolID}", requireSession(limitSession(http.HandlerFunc(deps.WorkerPools.Update))))
 	mux.Handle("DELETE /v1/projects/{projectID}/worker-pools/{poolID}", requireSession(limitSession(http.HandlerFunc(deps.WorkerPools.Delete))))
 	mux.Handle("POST /v1/projects/{projectID}/worker-pools/{poolID}/enrollment-tokens", requireSession(limitSession(http.HandlerFunc(deps.WorkerPools.CreateEnrollmentToken))))

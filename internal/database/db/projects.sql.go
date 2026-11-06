@@ -44,6 +44,18 @@ func (q *Queries) ArchiveProject(ctx context.Context, arg ArchiveProjectParams) 
 	return i, err
 }
 
+const countProjectsByUser = `-- name: CountProjectsByUser :one
+SELECT count(*) FROM projects
+WHERE user_id = $1 AND archived_at IS NULL
+`
+
+func (q *Queries) CountProjectsByUser(ctx context.Context, userID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countProjectsByUser, userID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createProject = `-- name: CreateProject :one
 INSERT INTO projects (user_id, name)
 VALUES ($1, $2)

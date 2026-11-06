@@ -141,6 +141,28 @@ func (h *WorkerPoolHandler) List(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"worker_pools": response})
 }
 
+func (h *WorkerPoolHandler) Usage(w http.ResponseWriter, r *http.Request) {
+	session, ok := middleware.SessionFromContext(r.Context())
+	if !ok {
+		httpx.WriteError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
+	projectID, err := uuid.Parse(r.PathValue("projectID"))
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid project id")
+		return
+	}
+
+	usage, err := h.service.Usage(r.Context(), session.User.ID, projectID)
+	if err != nil {
+		writeWorkerPoolError(w, "worker pool usage", err)
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"usage": usage})
+}
+
 func (h *WorkerPoolHandler) Update(w http.ResponseWriter, r *http.Request) {
 	session, ok := middleware.SessionFromContext(r.Context())
 	if !ok {
@@ -443,6 +465,12 @@ func writeWorkerPoolError(w http.ResponseWriter, operation string, err error) {
 		httpx.WriteError(w, http.StatusBadRequest, "update must contain at least one field")
 	case errors.Is(err, workerpool.ErrNameTaken):
 		httpx.WriteError(w, http.StatusConflict, "a worker pool with that name already exists")
+	case errors.Is(err, workerpool.ErrPoolLimit):
+		httpx.WriteError(w, http.StatusForbidden, "worker pool limit reached for this project")
+	case errors.Is(err, workerpool.ErrActivePoolLimit):
+		httpx.WriteError(w, http.StatusForbidden, "active worker pool limit reached for this project")
+	case errors.Is(err, workerpool.ErrConcurrencyLimit):
+		httpx.WriteError(w, http.StatusForbidden, "worker concurrency limit reached for this project")
 	case errors.Is(err, project.ErrProjectNotFound):
 		httpx.WriteError(w, http.StatusNotFound, "project not found")
 	case errors.Is(err, workerpool.ErrPoolNotFound):

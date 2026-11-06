@@ -34,3 +34,7 @@ RETURNING *;
 
 -- name: DeleteProject :exec
 DELETE FROM projects WHERE id = $1;
+
+-- name: CountProjectsByUser :one
+SELECT count(*) FROM projects
+WHERE user_id = $1 AND archived_at IS NULL;

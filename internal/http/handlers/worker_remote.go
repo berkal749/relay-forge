@@ -15,6 +15,7 @@ import (
 	"relayforge/internal/database/db"
 	"relayforge/internal/execution"
 	"relayforge/internal/http/httpx"
+	"relayforge/internal/metrics"
 	"relayforge/internal/middleware"
 )
 
@@ -22,6 +23,7 @@ type WorkerRemoteConfig struct {
 	LeaseGrace        time.Duration
 	TrustProxyHeaders bool
 	MTLSHeader        string
+	Metrics           *metrics.Metrics
 }
 
 // WorkerRemoteHandler implements the API-only worker protocol. Workers
@@ -185,6 +187,9 @@ func (h *WorkerRemoteHandler) Claim(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusInternalServerError, "internal server error")
 		return
 	}
+	if h.config.Metrics != nil {
+		h.config.Metrics.RecordClaim(project.ID.String())
+	}
 
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"job":       toJobResponse(claim.Job),
@@ -225,6 +230,9 @@ func (h *WorkerRemoteHandler) Complete(w http.ResponseWriter, r *http.Request) {
 	if err := h.execution.SucceedExecution(r.Context(), token.ProjectID, worker.ID, request.ExecutionID, request.Result); err != nil {
 		h.writeExecutionError(w, "complete remote execution", err)
 		return
+	}
+	if h.config.Metrics != nil {
+		h.config.Metrics.RecordSuccess(token.ProjectID.String())
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -273,6 +281,12 @@ func (h *WorkerRemoteHandler) Fail(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.writeExecutionError(w, "fail remote execution", err)
 		return
+	}
+	if h.config.Metrics != nil {
+		h.config.Metrics.RecordFailure(token.ProjectID.String())
+		if outcome.Retry {
+			h.config.Metrics.RecordRetry(token.ProjectID.String())
+		}
 	}
 
 	response := map[string]any{

@@ -82,12 +82,41 @@ Authorization: Bearer <session-token>
 
 | Method | Endpoint | Description |
 | --- | --- | --- |
-| `POST` | `/v1/auth/register` | Register with `email` and `password` |
+| `GET` | `/v1/auth/config` | Public registration mode (`open`, `invite`, or `closed`) |
+| `POST` | `/v1/auth/register` | Register with `email`, `password`, and `invite_token` when required |
 | `POST` | `/v1/auth/login` | Create a session and return a bearer token |
-| `GET` | `/v1/auth/me` | Return the current user |
+| `GET` | `/v1/auth/me` | Return the current user and role |
 | `POST` | `/v1/auth/logout` | Revoke the current session |
 
 Sessions are stored as SHA-256 hashes of opaque random tokens. Session lifetime defaults to 30 days and can be set with `SESSION_TTL`.
+
+`REGISTRATION_MODE` controls access:
+
+| Mode | Behavior |
+| --- | --- |
+| `open` | Anyone can register. Development only; production rejects it. |
+| `invite` | Registration requires a single-use invite token. Production requires an explicit non-open mode; the production Compose overlay defaults to `invite`. |
+| `closed` | Registration is disabled. |
+
+Invite tokens use the `rf_invite_` prefix, are returned once, stored as SHA-256 hashes, and expire after `INVITE_TTL` (default 7 days). An invite may be bound to an email and may grant the `admin` role. `BOOTSTRAP_ADMIN_EMAIL` promotes that email on registration and can register without an invite.
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `POST` | `/v1/admin/invites` | Create an invite (admin only) |
+| `GET` | `/v1/admin/invites` | List invites (admin only) |
+| `DELETE` | `/v1/admin/invites/{id}` | Revoke an invite (admin only) |
+
+### Quotas
+
+Per-account and per-project limits are enforced at creation time and re-checked defensively by the supervisor. `0` disables a limit. The project dashboard shows current usage.
+
+| Variable | Default |
+| --- | --- |
+| `MAX_PROJECTS_PER_USER` | `5` |
+| `MAX_WORKER_POOLS_PER_PROJECT` | `10` |
+| `MAX_ACTIVE_POOLS_PER_PROJECT` | `5` |
+| `MAX_WORKER_CONCURRENCY_PER_PROJECT` | `50` |
+| `MAX_QUEUED_JOBS_PER_PROJECT` | `100000` |
 
 ### Projects
 
@@ -282,14 +311,12 @@ make run-worker
 
 The worker:
 
-- Dispatches outbox messages
-- Claims jobs with `FOR UPDATE SKIP LOCKED`
+- Claims jobs with `FOR UPDATE SKIP LOCKED` (the API dispatches the outbox in remote mode)
 - Runs jobs concurrently with a bounded worker pool
 - Records every attempt in `executions`
 - Applies context timeouts to handlers
 - Retries failures with exponential backoff
 - Applies project concurrency, rate-limit, and job-timeout settings
-- Deletes terminal jobs beyond the project retention window
 - Drains in-flight work during graceful shutdown
 - Sends worker heartbeats and marks itself offline on exit
 
@@ -303,6 +330,26 @@ docker compose --profile supervisor up -d
 ```
 
 See [docs/processing-engine.md](docs/processing-engine.md) for configuration and behavior details.
+
+## Production and beta operations
+
+Production uses Caddy for TLS and dashboard hosting, keeps PostgreSQL on a private network, and runs non-root containers with resource limits:
+
+```sh
+docker compose -f compose.yaml -f compose.production.yaml up -d --build
+```
+
+Production startup fails fast unless `API_KEY_PEPPER` and `WORKER_TOKEN_PEPPER` are independent 32+ character secrets, `REGISTRATION_MODE` is explicit and not `open`, and `TRUST_PROXY_HEADERS` is explicit. See [docs/operations.md](docs/operations.md) for bootstrap, invites, quotas, TLS, monitoring, backups, restore drills, worker recovery, and the beta go/no-go checklist.
+
+Prometheus metrics are served internally on `METRICS_ADDR` (default `:9090`); `/healthz` is liveness and `/readyz` checks PostgreSQL. Starter scrape config and alerts live in `deployments/prometheus/`.
+
+Back up the database with:
+
+```sh
+./scripts/backup.sh
+```
+
+CI runs Go build/vet/tests/race tests, sqlc drift, a migration round-trip, web lint/build, and both Docker image builds.
 
 ## Developer dashboard
 

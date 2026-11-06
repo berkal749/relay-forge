@@ -79,6 +79,18 @@ func (q *Queries) ClaimJob(ctx context.Context, arg ClaimJobParams) (Job, error)
 	return i, err
 }
 
+const countQueuedJobsByProject = `-- name: CountQueuedJobsByProject :one
+SELECT count(*) FROM jobs
+WHERE project_id = $1 AND status IN ('pending', 'scheduled')
+`
+
+func (q *Queries) CountQueuedJobsByProject(ctx context.Context, projectID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countQueuedJobsByProject, projectID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createJob = `-- name: CreateJob :one
 INSERT INTO jobs (
     project_id,
@@ -408,6 +420,37 @@ func (q *Queries) MarkJobSucceeded(ctx context.Context, id uuid.UUID) (Job, erro
 		&i.IdempotencyHash,
 	)
 	return i, err
+}
+
+const queueDepthByProject = `-- name: QueueDepthByProject :many
+SELECT project_id, count(*) AS depth FROM jobs
+WHERE status IN ('pending', 'scheduled')
+GROUP BY project_id
+`
+
+type QueueDepthByProjectRow struct {
+	ProjectID uuid.UUID `json:"project_id"`
+	Depth     int64     `json:"depth"`
+}
+
+func (q *Queries) QueueDepthByProject(ctx context.Context) ([]QueueDepthByProjectRow, error) {
+	rows, err := q.db.Query(ctx, queueDepthByProject)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []QueueDepthByProjectRow{}
+	for rows.Next() {
+		var i QueueDepthByProjectRow
+		if err := rows.Scan(&i.ProjectID, &i.Depth); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const updateJobStatus = `-- name: UpdateJobStatus :one

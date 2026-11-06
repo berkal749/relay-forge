@@ -35,6 +35,9 @@ func run() error {
 		return err
 	}
 
+	if err := cfg.ValidateWorker(); err != nil {
+		return err
+	}
 	if err := worker.LoadSecretsFile(cfg.WorkerSecretsFile); err != nil {
 		return err
 	}

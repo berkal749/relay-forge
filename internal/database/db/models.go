@@ -35,6 +35,18 @@ type Execution struct {
 	LeaseExpiresAt *time.Time `json:"lease_expires_at"`
 }
 
+type Invite struct {
+	ID         uuid.UUID  `json:"id"`
+	TokenHash  string     `json:"token_hash"`
+	Email      *string    `json:"email"`
+	Role       string     `json:"role"`
+	CreatedBy  *uuid.UUID `json:"created_by"`
+	ConsumedBy *uuid.UUID `json:"consumed_by"`
+	ExpiresAt  time.Time  `json:"expires_at"`
+	ConsumedAt *time.Time `json:"consumed_at"`
+	CreatedAt  time.Time  `json:"created_at"`
+}
+
 type Job struct {
 	ID              uuid.UUID `json:"id"`
 	ProjectID       uuid.UUID `json:"project_id"`
@@ -90,6 +102,7 @@ type User struct {
 	Email        string    `json:"email"`
 	PasswordHash string    `json:"password_hash"`
 	CreatedAt    time.Time `json:"created_at"`
+	Role         string    `json:"role"`
 }
 
 type Worker struct {

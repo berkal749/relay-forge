@@ -50,3 +50,23 @@ RETURNING *;
 -- name: DeleteWorkerPool :execrows
 DELETE FROM worker_pools
 WHERE id = $1 AND project_id = $2;
+
+-- name: CountWorkerPoolsByProject :one
+SELECT count(*) FROM worker_pools
+WHERE project_id = $1;
+
+-- name: CountActiveWorkerPoolsByProject :one
+SELECT count(*) FROM worker_pools
+WHERE project_id = $1 AND status = 'active';
+
+-- name: CountActiveWorkerPoolsByProjectExcluding :one
+SELECT count(*) FROM worker_pools
+WHERE project_id = $1 AND status = 'active' AND id <> $2;
+
+-- name: SumWorkerConcurrencyByProject :one
+SELECT COALESCE(SUM(concurrency), 0)::bigint FROM worker_pools
+WHERE project_id = $1 AND status = 'active';
+
+-- name: SumWorkerConcurrencyByProjectExcluding :one
+SELECT COALESCE(SUM(concurrency), 0)::bigint FROM worker_pools
+WHERE project_id = $1 AND status = 'active' AND id <> $2;
