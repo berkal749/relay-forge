@@ -1,0 +1,87 @@
+-- name: ClaimJob :one
+WITH candidate AS (
+    SELECT jobs.id
+    FROM jobs
+    WHERE jobs.project_id = $1
+      AND jobs.status IN ('pending', 'scheduled')
+      AND jobs.scheduled_at <= now()
+      AND jobs.attempts < jobs.max_attempts
+      AND EXISTS (
+          SELECT 1
+          FROM outbox_messages
+          WHERE outbox_messages.job_id = jobs.id
+            AND outbox_messages.status = 'processed'
+      )
+    ORDER BY jobs.priority DESC, jobs.scheduled_at ASC, jobs.created_at ASC
+    LIMIT 1
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE jobs
+SET status = 'running', attempts = attempts + 1
+FROM candidate
+WHERE jobs.id = candidate.id
+RETURNING jobs.*;
+
+-- name: MarkJobSucceeded :one
+UPDATE jobs
+SET status = 'succeeded'
+WHERE id = $1 AND status = 'running'
+RETURNING *;
+
+-- name: MarkJobScheduled :one
+UPDATE jobs
+SET status = 'scheduled', scheduled_at = $2
+WHERE id = $1 AND status = 'running'
+RETURNING *;
+
+-- name: MarkJobFailed :one
+UPDATE jobs
+SET status = 'failed'
+WHERE id = $1 AND status = 'running'
+RETURNING *;
+
+-- name: CreateJob :one
+INSERT INTO jobs (
+    project_id,
+    queue_name,
+    job_type,
+    payload,
+    status,
+    priority,
+    max_attempts,
+    scheduled_at,
+    idempotency_key,
+    idempotency_hash
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+ON CONFLICT (project_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+RETURNING *;
+
+-- name: GetJobByIdempotencyKey :one
+SELECT * FROM jobs
+WHERE project_id = $1 AND idempotency_key = $2;
+
+-- name: GetJob :one
+SELECT * FROM jobs WHERE id = $1;
+
+-- name: GetJobForProject :one
+SELECT * FROM jobs
+WHERE id = $1 AND project_id = $2;
+
+-- name: ListJobsByProject :many
+SELECT * FROM jobs
+WHERE project_id = $1
+ORDER BY created_at DESC
+LIMIT $2 OFFSET $3;
+
+-- name: UpdateJobStatus :one
+UPDATE jobs
+SET status = $2
+WHERE id = $1
+RETURNING *;
+
+-- name: DeleteExpiredJobs :execrows
+DELETE FROM jobs
+WHERE project_id = sqlc.arg('project_id')
+  AND status IN ('succeeded', 'failed', 'cancelled')
+  AND updated_at < now() - make_interval(days => sqlc.arg('retention_days')::int);

@@ -1,0 +1,9 @@
+DROP TABLE IF EXISTS outbox_messages;
+DROP TABLE IF EXISTS executions;
+DROP TABLE IF EXISTS jobs;
+DROP TABLE IF EXISTS workers;
+DROP TABLE IF EXISTS api_keys;
+DROP TABLE IF EXISTS projects;
+DROP TABLE IF EXISTS users;
+
+DROP FUNCTION IF EXISTS set_jobs_updated_at();

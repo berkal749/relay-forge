@@ -1,0 +1,20 @@
+# Build output
+/bin/
+/dist/
+
+# Local logs
+/logs/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Editor/OS files
+.idea/
+.vscode/
+.DS_Store
+
+# Local agent/browser tool state
+.serena/
+.playwright-mcp/

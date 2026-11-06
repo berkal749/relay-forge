@@ -1,0 +1,210 @@
+package config
+
+import (
+	"fmt"
+	"os"
+	"strconv"
+	"time"
+)
+
+const (
+	defaultDatabaseURL = "postgres://relayforge:relayforge@localhost:5435/relayforge?sslmode=disable"
+	defaultHTTPAddr    = ":8080"
+	defaultSessionTTL  = 30 * 24 * time.Hour
+)
+
+type Config struct {
+	AppEnv                 string
+	DatabaseURL            string
+	DatabaseConnectTimeout time.Duration
+	HTTPAddr               string
+	SessionTTL             time.Duration
+	APIKeyPepper           string
+	WorkerTokenPepper      string
+
+	RateLimitAuthPerMinute      int
+	RateLimitAPIPerMinute       int
+	RateLimitJobSubmitPerMinute int
+
+	WorkerProjectID         string
+	WorkerToken             string
+	WorkerName              string
+	WorkerConcurrency       int
+	WorkerPollInterval      time.Duration
+	WorkerJobTimeout        time.Duration
+	WorkerShutdownTimeout   time.Duration
+	WorkerHeartbeatInterval time.Duration
+	WorkerCleanupInterval   time.Duration
+	RetryBaseDelay          time.Duration
+	RetryMaxDelay           time.Duration
+}
+
+func Load() (Config, error) {
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = defaultDatabaseURL
+	}
+
+	httpAddr := os.Getenv("HTTP_ADDR")
+	if httpAddr == "" {
+		httpAddr = defaultHTTPAddr
+	}
+
+	sessionTTL, err := envDuration("SESSION_TTL", defaultSessionTTL)
+	if err != nil {
+		return Config{}, err
+	}
+
+	appEnv := os.Getenv("APP_ENV")
+	if appEnv == "" {
+		appEnv = "development"
+	}
+
+	apiKeyPepper := os.Getenv("API_KEY_PEPPER")
+	if apiKeyPepper == "" {
+		if appEnv == "production" {
+			return Config{}, fmt.Errorf("API_KEY_PEPPER is required when APP_ENV=production")
+		}
+		apiKeyPepper = "relayforge-development-pepper"
+	}
+	if len(apiKeyPepper) < 16 {
+		return Config{}, fmt.Errorf("API_KEY_PEPPER must be at least 16 characters")
+	}
+
+	workerTokenPepper := os.Getenv("WORKER_TOKEN_PEPPER")
+	if workerTokenPepper == "" {
+		workerTokenPepper = apiKeyPepper
+	}
+	if len(workerTokenPepper) < 16 {
+		return Config{}, fmt.Errorf("WORKER_TOKEN_PEPPER must be at least 16 characters")
+	}
+
+	rateLimitAuthPerMinute, err := envNonNegativeInt("RATE_LIMIT_AUTH_PER_MINUTE", 20)
+	if err != nil {
+		return Config{}, err
+	}
+	rateLimitAPIPerMinute, err := envNonNegativeInt("RATE_LIMIT_API_PER_MINUTE", 600)
+	if err != nil {
+		return Config{}, err
+	}
+	rateLimitJobSubmitPerMinute, err := envNonNegativeInt("RATE_LIMIT_JOB_SUBMIT_PER_MINUTE", 120)
+	if err != nil {
+		return Config{}, err
+	}
+
+	workerName := os.Getenv("WORKER_NAME")
+	if workerName == "" {
+		workerName = defaultWorkerName()
+	}
+
+	workerConcurrency, err := envInt("WORKER_CONCURRENCY", 4)
+	if err != nil {
+		return Config{}, err
+	}
+	if workerConcurrency < 1 || workerConcurrency > 1000 {
+		return Config{}, fmt.Errorf("WORKER_CONCURRENCY must be between 1 and 1000")
+	}
+
+	workerPollInterval, err := envDuration("WORKER_POLL_INTERVAL", time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	workerJobTimeout, err := envDuration("JOB_TIMEOUT", 5*time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
+	workerShutdownTimeout, err := envDuration("WORKER_SHUTDOWN_TIMEOUT", 30*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	workerHeartbeatInterval, err := envDuration("WORKER_HEARTBEAT_INTERVAL", 15*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	workerCleanupInterval, err := envDuration("WORKER_CLEANUP_INTERVAL", time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
+	retryBaseDelay, err := envDuration("RETRY_BASE_DELAY", 5*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	retryMaxDelay, err := envDuration("RETRY_MAX_DELAY", 5*time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
+	if retryMaxDelay < retryBaseDelay {
+		return Config{}, fmt.Errorf("RETRY_MAX_DELAY must be greater than or equal to RETRY_BASE_DELAY")
+	}
+
+	return Config{
+		AppEnv:                      appEnv,
+		DatabaseURL:                 databaseURL,
+		DatabaseConnectTimeout:      10 * time.Second,
+		HTTPAddr:                    httpAddr,
+		SessionTTL:                  sessionTTL,
+		APIKeyPepper:                apiKeyPepper,
+		WorkerTokenPepper:           workerTokenPepper,
+		RateLimitAuthPerMinute:      rateLimitAuthPerMinute,
+		RateLimitAPIPerMinute:       rateLimitAPIPerMinute,
+		RateLimitJobSubmitPerMinute: rateLimitJobSubmitPerMinute,
+
+		WorkerProjectID:         os.Getenv("WORKER_PROJECT_ID"),
+		WorkerToken:             os.Getenv("WORKER_TOKEN"),
+		WorkerName:              workerName,
+		WorkerConcurrency:       workerConcurrency,
+		WorkerPollInterval:      workerPollInterval,
+		WorkerJobTimeout:        workerJobTimeout,
+		WorkerShutdownTimeout:   workerShutdownTimeout,
+		WorkerHeartbeatInterval: workerHeartbeatInterval,
+		WorkerCleanupInterval:   workerCleanupInterval,
+		RetryBaseDelay:          retryBaseDelay,
+		RetryMaxDelay:           retryMaxDelay,
+	}, nil
+}
+
+func envDuration(name string, fallback time.Duration) (time.Duration, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s: %w", name, err)
+	}
+	if parsed <= 0 {
+		return 0, fmt.Errorf("%s must be positive", name)
+	}
+	return parsed, nil
+}
+
+func envInt(name string, fallback int) (int, error) {
+	value := os.Getenv(name)
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func envNonNegativeInt(name string, fallback int) (int, error) {
+	parsed, err := envInt(name, fallback)
+	if err != nil {
+		return 0, err
+	}
+	if parsed < 0 {
+		return 0, fmt.Errorf("%s must not be negative", name)
+	}
+	return parsed, nil
+}
+
+func defaultWorkerName() string {
+	hostname, err := os.Hostname()
+	if err != nil || hostname == "" {
+		return "relayforge-worker"
+	}
+	return "relayforge-worker-" + hostname
+}

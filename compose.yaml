@@ -1,0 +1,69 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-relayforge}
+      POSTGRES_USER: ${POSTGRES_USER:-relayforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-relayforge}
+    ports:
+      - "${POSTGRES_PORT:-5435}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  api:
+    build:
+      context: .
+      args:
+        TARGET: api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-relayforge}:${POSTGRES_PASSWORD:-relayforge}@postgres:5432/${POSTGRES_DB:-relayforge}?sslmode=disable
+      APP_ENV: ${APP_ENV:-development}
+      HTTP_ADDR: ":8080"
+      SESSION_TTL: ${SESSION_TTL:-720h}
+      API_KEY_PEPPER: ${API_KEY_PEPPER:-relayforge-development-pepper}
+      WORKER_TOKEN_PEPPER: ${WORKER_TOKEN_PEPPER:-}
+      RATE_LIMIT_AUTH_PER_MINUTE: ${RATE_LIMIT_AUTH_PER_MINUTE:-20}
+      RATE_LIMIT_API_PER_MINUTE: ${RATE_LIMIT_API_PER_MINUTE:-600}
+      RATE_LIMIT_JOB_SUBMIT_PER_MINUTE: ${RATE_LIMIT_JOB_SUBMIT_PER_MINUTE:-120}
+    ports:
+      - "${API_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      args:
+        TARGET: worker
+    profiles: ["worker"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-relayforge}:${POSTGRES_PASSWORD:-relayforge}@postgres:5432/${POSTGRES_DB:-relayforge}?sslmode=disable
+      API_KEY_PEPPER: ${API_KEY_PEPPER:-relayforge-development-pepper}
+      WORKER_TOKEN_PEPPER: ${WORKER_TOKEN_PEPPER:-}
+      WORKER_PROJECT_ID: ${WORKER_PROJECT_ID:-}
+      WORKER_TOKEN: ${WORKER_TOKEN:-}
+      WORKER_NAME: ${WORKER_NAME:-relayforge-worker}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
+      WORKER_POLL_INTERVAL: ${WORKER_POLL_INTERVAL:-1s}
+      JOB_TIMEOUT: ${JOB_TIMEOUT:-5m}
+      WORKER_SHUTDOWN_TIMEOUT: ${WORKER_SHUTDOWN_TIMEOUT:-30s}
+      WORKER_HEARTBEAT_INTERVAL: ${WORKER_HEARTBEAT_INTERVAL:-15s}
+      WORKER_CLEANUP_INTERVAL: ${WORKER_CLEANUP_INTERVAL:-1h}
+      RETRY_BASE_DELAY: ${RETRY_BASE_DELAY:-5s}
+      RETRY_MAX_DELAY: ${RETRY_MAX_DELAY:-5m}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
