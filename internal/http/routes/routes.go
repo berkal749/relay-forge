@@ -19,6 +19,7 @@ type Dependencies struct {
 	WorkerPools              *handlers.WorkerPoolHandler
 	Enrollment               *handlers.EnrollmentHandler
 	WorkerRemote             *handlers.WorkerRemoteHandler
+	Schedules                *handlers.ScheduleHandler
 	Jobs                     *handlers.JobHandler
 	Authenticator            middleware.Authenticator
 	APIKeyAuthenticator      middleware.APIKeyAuthenticator
@@ -93,6 +94,11 @@ func New(deps Dependencies) http.Handler {
 	mux.Handle("DELETE /v1/projects/{projectID}/worker-pools/{poolID}", requireSession(limitSession(http.HandlerFunc(deps.WorkerPools.Delete))))
 	mux.Handle("POST /v1/projects/{projectID}/worker-pools/{poolID}/enrollment-tokens", requireSession(limitSession(http.HandlerFunc(deps.WorkerPools.CreateEnrollmentToken))))
 
+	mux.Handle("POST /v1/projects/{projectID}/schedules", requireSession(limitSession(http.HandlerFunc(deps.Schedules.Create))))
+	mux.Handle("GET /v1/projects/{projectID}/schedules", requireSession(limitSession(http.HandlerFunc(deps.Schedules.List))))
+	mux.Handle("PATCH /v1/projects/{projectID}/schedules/{scheduleID}", requireSession(limitSession(http.HandlerFunc(deps.Schedules.Update))))
+	mux.Handle("DELETE /v1/projects/{projectID}/schedules/{scheduleID}", requireSession(limitSession(http.HandlerFunc(deps.Schedules.Delete))))
+
 	mux.Handle("GET /v1/projects/{projectID}/workers", requireSession(limitSession(http.HandlerFunc(deps.WorkerPools.Workers))))
 	mux.Handle("GET /v1/projects/{projectID}/worker-pools/{poolID}/workers", requireSession(limitSession(http.HandlerFunc(deps.WorkerPools.PoolWorkers))))
 
@@ -102,6 +108,7 @@ func New(deps Dependencies) http.Handler {
 	mux.Handle("POST /v1/workers/register", requireWorker(http.HandlerFunc(deps.WorkerRemote.Register)))
 	mux.Handle("POST /v1/workers/heartbeat", requireWorker(http.HandlerFunc(deps.WorkerRemote.Heartbeat)))
 	mux.Handle("POST /v1/workers/claim", requireWorker(http.HandlerFunc(deps.WorkerRemote.Claim)))
+	mux.Handle("POST /v1/workers/jobs", requireWorker(http.HandlerFunc(deps.WorkerRemote.Submit)))
 	mux.Handle("POST /v1/workers/jobs/{jobID}/complete", requireWorker(http.HandlerFunc(deps.WorkerRemote.Complete)))
 	mux.Handle("POST /v1/workers/jobs/{jobID}/fail", requireWorker(http.HandlerFunc(deps.WorkerRemote.Fail)))
 	mux.Handle("POST /v1/workers/offline", requireWorker(http.HandlerFunc(deps.WorkerRemote.Offline)))

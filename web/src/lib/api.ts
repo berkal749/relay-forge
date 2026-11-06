@@ -92,6 +92,36 @@ export type WorkerPoolUsage = {
   max_concurrency: number
 }
 
+export type Schedule = {
+  id: string
+  project_id: string
+  name: string
+  cron: string
+  timezone: string
+  enabled: boolean
+  job_type: string
+  queue_name: string
+  payload: unknown
+  priority: number
+  max_attempts: number
+  next_run_at: string
+  last_run_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export type ScheduleInput = {
+  name?: string
+  cron?: string
+  timezone?: string
+  enabled?: boolean
+  job_type?: string
+  queue_name?: string
+  payload?: unknown
+  priority?: number
+  max_attempts?: number
+}
+
 export type Project = {
   id: string
   user_id: string
@@ -412,6 +442,39 @@ export const api = {
     return request<{ usage: WorkerPoolUsage }>(
       `/v1/projects/${projectId}/worker-pools/usage`,
       { token },
+    )
+  },
+
+  listSchedules(token: string, projectId: string) {
+    return request<{ schedules: Schedule[] }>(
+      `/v1/projects/${projectId}/schedules`,
+      { token },
+    )
+  },
+
+  createSchedule(token: string, projectId: string, input: ScheduleInput) {
+    return request<{ schedule: Schedule }>(
+      `/v1/projects/${projectId}/schedules`,
+      { method: "POST", token, body: input },
+    )
+  },
+
+  updateSchedule(
+    token: string,
+    projectId: string,
+    scheduleId: string,
+    input: ScheduleInput,
+  ) {
+    return request<{ schedule: Schedule }>(
+      `/v1/projects/${projectId}/schedules/${scheduleId}`,
+      { method: "PATCH", token, body: input },
+    )
+  },
+
+  deleteSchedule(token: string, projectId: string, scheduleId: string) {
+    return request<void>(
+      `/v1/projects/${projectId}/schedules/${scheduleId}`,
+      { method: "DELETE", token },
     )
   },
 

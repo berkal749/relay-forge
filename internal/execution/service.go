@@ -280,7 +280,7 @@ func (s *Service) fail(ctx context.Context, job db.Job, execution db.Execution, 
 		executionStatus = "cancelled"
 	}
 
-	retry := job.Attempts < job.MaxAttempts
+	retry := job.Attempts < job.MaxAttempts && !IsPermanent(cause)
 	var retryAt time.Time
 	jobStatus := "failed"
 	if retry {

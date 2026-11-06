@@ -124,6 +124,8 @@ Key packages:
 | `internal/secret` | Shared HMAC/SHA-256/prefix helpers for bearer credentials. |
 | `internal/project` | Project CRUD and settings; delete = archive (`archived_at`), never hard delete. |
 | `internal/job` | Job submission, validation, status model/transitions, reads. |
+| `internal/action` | Built-in handlers: `http.request`, `delay.run`, and `notify.*` channels. |
+| `internal/schedule` | Cron schedule validation, persistence, and due-schedule job submission. |
 | `internal/execution` | Claim/succeed/fail transactions, retry backoff, handler registry, dev handlers. |
 | `internal/outbox` | Transactional outbox dispatcher + `pg_notify` notifier. |
 | `internal/worker` | Worker registration/heartbeat/offline and the concurrent pool. |
@@ -148,7 +150,8 @@ Important invariants:
 - Job submission supports per-project idempotency via the `Idempotency-Key` header. The key and a request fingerprint are stored on `jobs`; replays return the original job, and a mismatched fingerprint is a conflict.
 - Users have a `role` (`user` or `admin`). Admin-only routes use `middleware.RequireAdmin` after session auth.
 - `REGISTRATION_MODE` is `open`, `invite`, or `closed`. Production requires an explicit non-open mode. Invite registration consumes the invite and creates the user in one transaction; invite tokens are single-use, optionally email-bound, optionally admin-granting, and expire after `INVITE_TTL`.
-- Quotas: `MAX_PROJECTS_PER_USER`, `MAX_WORKER_POOLS_PER_PROJECT`, `MAX_ACTIVE_POOLS_PER_PROJECT`, `MAX_WORKER_CONCURRENCY_PER_PROJECT`, `MAX_QUEUED_JOBS_PER_PROJECT`. `0` disables a limit. The supervisor re-applies active-pool and concurrency caps.
+- Quotas: `MAX_PROJECTS_PER_USER`, `MAX_WORKER_POOLS_PER_PROJECT`, `MAX_ACTIVE_POOLS_PER_PROJECT`, `MAX_WORKER_CONCURRENCY_PER_PROJECT`, `MAX_QUEUED_JOBS_PER_PROJECT`, `MAX_SCHEDULES_PER_PROJECT`. `0` disables a limit. The supervisor re-applies active-pool and concurrency caps.
+- `schedules` stores cron templates per project. The API evaluates due rows every `API_SCHEDULER_INTERVAL`, submits a job with a `schedule:<id>:<run-time>` idempotency key, and advances `next_run_at` with an optimistic update. Cron uses five-field syntax plus descriptors and an IANA timezone.
 - Projects carry settings: `default_queue_name`, `default_max_attempts`, `default_priority`, `job_retention_days`, `max_concurrency`, `rate_limit_per_minute`, `default_job_timeout_seconds`. Submission defaults are applied by `job.Service.Submit`; worker limits are read at startup; retention is re-read on each cleanup tick.
 - `PATCH /v1/projects/{id}` is a partial update: omitted fields stay unchanged, and an empty update is rejected.
 - Worker pools are per-project desired config (`name`, `concurrency`, `active`/`paused`, `queue_names`, `job_timeout_seconds`, `max_attempts`, `retry_backoff`, retry delays). Names are unique per project; concurrency is 1–1000 (default 4). Empty `queue_names` means all queues.
@@ -173,11 +176,21 @@ Important invariants:
 8. The **supervisor** reconciles `worker_pools` every `SUPERVISOR_POLL_INTERVAL`: it issues an enrollment token, spawns one remote `relayforge-worker` per active pool (clearing `DATABASE_URL`), restarts on name/concurrency/queue/timeout/retry changes, and stops workers when a pool is paused/deleted.
 9. Note: the `pg_notify` message is currently **not consumed** by `LISTEN`; workers poll. Treat notifications as forward-looking.
 
-Built-in handler types: `echo`, `noop`, `sleep` (payload `{"duration_ms": N}`). Register real handlers in `cmd/worker/main.go`:
+Built-in handler types:
 
-```go
-registry.Register("send_email", sendEmailHandler)
-```
+| Job type | Behavior |
+| --- | --- |
+| `http.request` | Calls a customer URL with method, headers, body/body template, and timeout. |
+| `delay.run` | Schedules a follow-up job by delay or absolute time. |
+| `notify.email` | Sends email through the operator's SMTP relay. |
+| `notify.slack` / `notify.discord` | Posts to an incoming webhook. |
+| `notify.telegram` | Sends via the Telegram Bot API. |
+| `notify.sms` | Sends via Twilio. |
+| `echo`, `noop`, `sleep` | Development handlers. |
+
+Handlers are registered in `internal/action/registry.go` and built into the worker. `cmd/worker/main.go` wires the registry with either a direct job submitter or an API submitter, and remote workers enqueue follow-ups through `POST /v1/workers/jobs`.
+
+Action credentials (`SMTP_*`, `SLACK_WEBHOOK_URL`, `DISCORD_WEBHOOK_URL`, `TELEGRAM_BOT_TOKEN`, `TWILIO_*`) come from the worker environment or `WORKER_SECRETS_FILE`. `WORKER_EGRESS_ALLOWLIST` restricts outbound hosts; loopback/private/link-local destinations are refused unless `WORKER_ALLOW_PRIVATE_EGRESS=true`.
 
 ## Conventions
 
@@ -224,6 +237,7 @@ registry.Register("send_email", sendEmailHandler)
 - Run `make web-lint` and `make web-build` after frontend changes.
 - `internal/integration` contains database integration tests gated on `TEST_DATABASE_URL`; `make test-integration` runs them against `DATABASE_URL`.
 - `.github/workflows/ci.yml` runs build, vet, tests, race tests, sqlc drift, migration round-trip, web lint/build, and Docker builds.
+- `internal/action` tests cover webhook templating, retry classification, SSRF blocking, delay idempotency, and notification payloads. `internal/schedule` tests cover cron/timezone validation.
 - `scripts/backup.sh` writes a custom-format `pg_dump` with retention.
 
 ## Roadmap / known gaps
@@ -245,6 +259,9 @@ Other known gaps:
 - `outbox_messages` has a `failed` status but no retry/dead-letter handling.
 - Worker is single-project per process; the supervisor runs one process per active pool. There is no replicas-per-pool field, multi-project host, or autoscaling.
 - No per-queue concurrency or job priority feedback beyond SQL ordering.
+- Cron schedules submit one job per tick; there is no catch-up burst after scheduler downtime.
+- Notification credentials are operator-wide; per-project credentials are not implemented.
+- `http.request` cannot chain response data into a follow-up job without code.
 - API and worker rate limiting are per process; multi-instance deployments need a shared store.
 - Metrics and rate limits are single-instance; no distributed tracing or OpenTelemetry.
 - API key rotation and worker token scopes are not implemented (worker token expiry, revocation, last-used tracking, rotation with grace, and enrollment-based rotation are).

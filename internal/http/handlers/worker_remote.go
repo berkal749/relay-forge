@@ -15,6 +15,7 @@ import (
 	"relayforge/internal/database/db"
 	"relayforge/internal/execution"
 	"relayforge/internal/http/httpx"
+	"relayforge/internal/job"
 	"relayforge/internal/metrics"
 	"relayforge/internal/middleware"
 )
@@ -31,14 +32,15 @@ type WorkerRemoteConfig struct {
 type WorkerRemoteHandler struct {
 	queries   *db.Queries
 	execution *execution.Service
+	jobs      *job.Service
 	config    WorkerRemoteConfig
 }
 
-func NewWorkerRemoteHandler(queries *db.Queries, executionService *execution.Service, config WorkerRemoteConfig) *WorkerRemoteHandler {
+func NewWorkerRemoteHandler(queries *db.Queries, executionService *execution.Service, jobs *job.Service, config WorkerRemoteConfig) *WorkerRemoteHandler {
 	if config.LeaseGrace <= 0 {
 		config.LeaseGrace = time.Minute
 	}
-	return &WorkerRemoteHandler{queries: queries, execution: executionService, config: config}
+	return &WorkerRemoteHandler{queries: queries, execution: executionService, jobs: jobs, config: config}
 }
 
 type workerRegisterRequest struct {
@@ -58,6 +60,16 @@ type workerFailRequest struct {
 	ExecutionID uuid.UUID `json:"execution_id"`
 	Error       string    `json:"error"`
 	Cancelled   bool      `json:"cancelled"`
+	Permanent   bool      `json:"permanent"`
+}
+
+type workerSubmitRequest struct {
+	QueueName   string          `json:"queue_name"`
+	JobType     string          `json:"job_type"`
+	Payload     json.RawMessage `json:"payload"`
+	Priority    *int32          `json:"priority"`
+	MaxAttempts *int32          `json:"max_attempts"`
+	ScheduledAt *time.Time      `json:"scheduled_at"`
 }
 
 type workerRegisterResponse struct {
@@ -273,7 +285,11 @@ func (h *WorkerRemoteHandler) Fail(w http.ResponseWriter, r *http.Request) {
 		message = "remote worker reported failure"
 	}
 	_, _, _, retryPolicy, _ := h.policy(pool, project)
-	outcome, err := h.execution.FailExecution(r.Context(), token.ProjectID, worker.ID, request.ExecutionID, errors.New(message), request.Cancelled, retryPolicy)
+	cause := errors.New(message)
+	if request.Permanent {
+		cause = execution.Permanent(cause)
+	}
+	outcome, err := h.execution.FailExecution(r.Context(), token.ProjectID, worker.ID, request.ExecutionID, cause, request.Cancelled, retryPolicy)
 	if errors.Is(err, execution.ErrExecutionAlreadyApplied) {
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{"already_applied": true})
 		return
@@ -297,6 +313,56 @@ func (h *WorkerRemoteHandler) Fail(w http.ResponseWriter, r *http.Request) {
 		response["retry_at"] = outcome.RetryAt
 	}
 	httpx.WriteJSON(w, http.StatusOK, response)
+}
+
+// Submit lets a worker enqueue a follow-up job in its own project. Remote
+// workers use it for delay.run without needing database access.
+func (h *WorkerRemoteHandler) Submit(w http.ResponseWriter, r *http.Request) {
+	_, _, project, ok := h.authorize(w, r)
+	if !ok {
+		return
+	}
+	if h.jobs == nil {
+		httpx.WriteError(w, http.StatusServiceUnavailable, "job submission is not configured")
+		return
+	}
+
+	var request workerSubmitRequest
+	if err := httpx.DecodeJSON(w, r, &request); err != nil {
+		httpx.WriteError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	var scheduledAt time.Time
+	if request.ScheduledAt != nil {
+		scheduledAt = *request.ScheduledAt
+	}
+
+	result, err := h.jobs.Submit(r.Context(), job.SubmitInput{
+		ProjectID:      project.ID,
+		QueueName:      request.QueueName,
+		JobType:        request.JobType,
+		Payload:        request.Payload,
+		Priority:       request.Priority,
+		MaxAttempts:    request.MaxAttempts,
+		ScheduledAt:    scheduledAt,
+		IdempotencyKey: strings.TrimSpace(r.Header.Get("Idempotency-Key")),
+	})
+	if err != nil {
+		writeJobError(w, "submit worker job", err)
+		return
+	}
+
+	if result.Replayed {
+		w.Header().Set("Idempotent-Replayed", "true")
+	}
+	httpx.WriteJSON(w, http.StatusCreated, map[string]any{
+		"job": map[string]any{
+			"id":           result.Job.ID,
+			"scheduled_at": result.Job.ScheduledAt,
+			"status":       result.Job.Status,
+		},
+	})
 }
 
 func (h *WorkerRemoteHandler) Offline(w http.ResponseWriter, r *http.Request) {

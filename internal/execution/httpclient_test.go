@@ -16,8 +16,8 @@ func TestHostAllowed(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		if got := hostAllowed(test.host, test.allowed); got != test.want {
-			t.Errorf("hostAllowed(%q, %v) = %v, want %v", test.host, test.allowed, got, test.want)
+		if got := HostAllowed(test.host, test.allowed); got != test.want {
+			t.Errorf("HostAllowed(%q, %v) = %v, want %v", test.host, test.allowed, got, test.want)
 		}
 	}
 }

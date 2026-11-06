@@ -11,10 +11,12 @@ import (
 	"syscall"
 	"time"
 
+	"relayforge/internal/action"
 	"relayforge/internal/config"
 	"relayforge/internal/database"
 	"relayforge/internal/database/db"
 	"relayforge/internal/execution"
+	"relayforge/internal/job"
 	"relayforge/internal/outbox"
 	"relayforge/internal/worker"
 	"relayforge/internal/workertoken"
@@ -110,6 +112,10 @@ func runRemote(cfg config.Config) error {
 	}
 
 	backend := worker.NewRemoteBackend(cfg.APIBaseURL, identity.Token, remote.WorkerID, nil)
+	registry, err := action.NewRegistry(action.FromConfig(cfg), action.NewAPISubmitter(cfg.APIBaseURL, identity.Token, nil))
+	if err != nil {
+		return fmt.Errorf("build handler registry: %w", err)
+	}
 	slog.Info("remote worker started",
 		"worker_id", remote.WorkerID,
 		"project_id", remote.ProjectID,
@@ -123,7 +129,7 @@ func runRemote(cfg config.Config) error {
 		"rate_limit_per_minute", remote.Project.RateLimitPerMinute,
 	)
 
-	return runPool(cfg, backend, concurrency, jobTimeout, int(remote.Project.RateLimitPerMinute))
+	return runPool(cfg, backend, registry, concurrency, jobTimeout, int(remote.Project.RateLimitPerMinute))
 }
 
 func runDirect(cfg config.Config) error {
@@ -210,6 +216,11 @@ func runDirect(cfg config.Config) error {
 	lease := jobTimeout + cfg.WorkerLeaseGrace
 	executionService := execution.NewService(pool, retryPolicy, queueNames, maxAttemptsOverride, lease)
 	backend := worker.NewDirectBackend(executionService, queries, projectID, workerRecord.ID, lease)
+	jobService := job.NewService(pool, job.Limits{MaxQueuedJobsPerProject: cfg.MaxQueuedJobsPerProject})
+	registry, err := action.NewRegistry(action.FromConfig(cfg), action.NewDirectSubmitter(jobService, projectID))
+	if err != nil {
+		return fmt.Errorf("build handler registry: %w", err)
+	}
 
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	defer cancelRun()
@@ -242,7 +253,7 @@ func runDirect(cfg config.Config) error {
 		"retry_max_delay", retryPolicy.Max,
 	)
 
-	runErr := runPoolWithContext(signalCtx, cfg, backend, concurrency, jobTimeout, int(projectRecord.RateLimitPerMinute))
+	runErr := runPoolWithContext(signalCtx, cfg, backend, registry, concurrency, jobTimeout, int(projectRecord.RateLimitPerMinute))
 	cancelRun()
 	outboxWorkers.Wait()
 
@@ -255,7 +266,7 @@ func runDirect(cfg config.Config) error {
 	return runErr
 }
 
-func runPool(cfg config.Config, backend worker.Backend, concurrency int, jobTimeout time.Duration, rateLimit int) error {
+func runPool(cfg config.Config, backend worker.Backend, registry *execution.Registry, concurrency int, jobTimeout time.Duration, rateLimit int) error {
 	runCtx, cancelRun := context.WithCancel(context.Background())
 	defer cancelRun()
 
@@ -264,7 +275,7 @@ func runPool(cfg config.Config, backend worker.Backend, concurrency int, jobTime
 
 	go worker.RunHeartbeat(signalCtx, backend, cfg.WorkerHeartbeatInterval)
 
-	runErr := runPoolWithContext(signalCtx, cfg, backend, concurrency, jobTimeout, rateLimit)
+	runErr := runPoolWithContext(signalCtx, cfg, backend, registry, concurrency, jobTimeout, rateLimit)
 	cancelRun()
 
 	offlineCtx, cancelOffline := context.WithTimeout(context.Background(), 10*time.Second)
@@ -276,12 +287,7 @@ func runPool(cfg config.Config, backend worker.Backend, concurrency int, jobTime
 	return runErr
 }
 
-func runPoolWithContext(ctx context.Context, cfg config.Config, backend worker.Backend, concurrency int, jobTimeout time.Duration, rateLimit int) error {
-	registry := execution.NewRegistry()
-	registry.Register("echo", execution.Echo)
-	registry.Register("noop", execution.Noop)
-	registry.Register("sleep", execution.Sleep)
-
+func runPoolWithContext(ctx context.Context, cfg config.Config, backend worker.Backend, registry *execution.Registry, concurrency int, jobTimeout time.Duration, rateLimit int) error {
 	poolRunner := worker.NewPool(backend, registry, worker.PoolConfig{
 		Concurrency:     concurrency,
 		PollInterval:    cfg.WorkerPollInterval,

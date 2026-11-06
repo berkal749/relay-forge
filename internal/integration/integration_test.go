@@ -17,6 +17,7 @@ import (
 	"relayforge/internal/job"
 	"relayforge/internal/outbox"
 	"relayforge/internal/project"
+	"relayforge/internal/schedule"
 	"relayforge/internal/workerpool"
 	"relayforge/internal/workertoken"
 )
@@ -289,5 +290,84 @@ func TestActivePoolQuotaFreesWhenPaused(t *testing.T) {
 	active := workerpool.StatusActive
 	if _, err := pools.Update(ctx, user.ID, created.ID, first.ID, workerpool.UpdateInput{Status: &active}); !errors.Is(err, workerpool.ErrActivePoolLimit) {
 		t.Fatalf("resume first pool error = %v, want ErrActivePoolLimit", err)
+	}
+}
+
+func TestScheduleRunDueSubmitsOnce(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	queries := db.New(pool)
+	user, _ := registerUser(t, pool, auth.RegistrationOpen)
+
+	projects := project.NewService(queries, project.Limits{MaxProjectsPerUser: 5})
+	created, err := projects.Create(ctx, user.ID, "schedules")
+	if err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	jobs := job.NewService(pool, job.Limits{MaxQueuedJobsPerProject: 100})
+	schedules := schedule.NewService(queries, jobs, projects, schedule.Limits{MaxSchedulesPerProject: 5})
+
+	item, err := schedules.Create(ctx, user.ID, created.ID, schedule.CreateInput{
+		Name:     "every-minute",
+		Cron:     "* * * * *",
+		Timezone: "UTC",
+		Enabled:  true,
+		JobType:  "noop",
+		Payload:  []byte(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("create schedule: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), "DELETE FROM schedules WHERE id = $1", item.ID)
+	})
+
+	if _, err := pool.Exec(ctx, "UPDATE schedules SET next_run_at = now() - interval '1 second' WHERE id = $1", item.ID); err != nil {
+		t.Fatalf("make schedule due: %v", err)
+	}
+
+	submitted, err := schedules.RunDue(ctx)
+	if err != nil {
+		t.Fatalf("run due: %v", err)
+	}
+	if submitted != 1 {
+		t.Fatalf("submitted = %d, want 1", submitted)
+	}
+
+	updated, err := queries.GetSchedule(ctx, db.GetScheduleParams{ID: item.ID, ProjectID: created.ID})
+	if err != nil {
+		t.Fatalf("get schedule: %v", err)
+	}
+	if !updated.NextRunAt.After(time.Now()) {
+		t.Fatalf("next run was not advanced: %s", updated.NextRunAt)
+	}
+	if updated.LastRunAt == nil {
+		t.Fatal("last run was not recorded")
+	}
+
+	again, err := schedules.RunDue(ctx)
+	if err != nil {
+		t.Fatalf("second run due: %v", err)
+	}
+	if again != 0 {
+		t.Fatalf("second run submitted = %d, want 0", again)
+	}
+
+	paused := false
+	if _, err := schedules.Update(ctx, user.ID, created.ID, item.ID, schedule.UpdateInput{Enabled: &paused}); err != nil {
+		t.Fatalf("pause schedule: %v", err)
+	}
+	list, err := jobs.List(ctx, created.ID, 50, 0)
+	if err != nil {
+		t.Fatalf("list jobs: %v", err)
+	}
+	found := false
+	for _, jobRecord := range list {
+		if jobRecord.JobType == "noop" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("schedule did not create a job")
 	}
 }

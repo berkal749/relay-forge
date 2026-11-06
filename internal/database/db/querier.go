@@ -11,6 +11,7 @@ import (
 )
 
 type Querier interface {
+	AdvanceSchedule(ctx context.Context, arg AdvanceScheduleParams) (int64, error)
 	ArchiveProject(ctx context.Context, arg ArchiveProjectParams) (Project, error)
 	ClaimJob(ctx context.Context, arg ClaimJobParams) (Job, error)
 	ClaimOutboxMessages(ctx context.Context, limit int32) ([]OutboxMessage, error)
@@ -21,6 +22,7 @@ type Querier interface {
 	CountOutboxBacklog(ctx context.Context) (int64, error)
 	CountProjectsByUser(ctx context.Context, userID uuid.UUID) (int64, error)
 	CountQueuedJobsByProject(ctx context.Context, projectID uuid.UUID) (int64, error)
+	CountSchedulesByProject(ctx context.Context, projectID uuid.UUID) (int64, error)
 	CountWorkerPoolsByProject(ctx context.Context, projectID uuid.UUID) (int64, error)
 	CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (ApiKey, error)
 	CreateExecution(ctx context.Context, arg CreateExecutionParams) (Execution, error)
@@ -28,6 +30,7 @@ type Querier interface {
 	CreateJob(ctx context.Context, arg CreateJobParams) (Job, error)
 	CreateOutboxMessage(ctx context.Context, jobID uuid.UUID) (OutboxMessage, error)
 	CreateProject(ctx context.Context, arg CreateProjectParams) (Project, error)
+	CreateSchedule(ctx context.Context, arg CreateScheduleParams) (Schedule, error)
 	CreateSession(ctx context.Context, arg CreateSessionParams) (Session, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
 	CreateUserWithRole(ctx context.Context, arg CreateUserWithRoleParams) (User, error)
@@ -39,6 +42,7 @@ type Querier interface {
 	DeleteExpiredSessions(ctx context.Context) error
 	DeleteInvite(ctx context.Context, id uuid.UUID) (int64, error)
 	DeleteProject(ctx context.Context, id uuid.UUID) error
+	DeleteSchedule(ctx context.Context, arg DeleteScheduleParams) (int64, error)
 	DeleteWorkerPool(ctx context.Context, arg DeleteWorkerPoolParams) (int64, error)
 	FinishExecution(ctx context.Context, arg FinishExecutionParams) (Execution, error)
 	GetAPIKeyByHash(ctx context.Context, keyHash string) (ApiKey, error)
@@ -52,6 +56,7 @@ type Querier interface {
 	GetJobByIdempotencyKey(ctx context.Context, arg GetJobByIdempotencyKeyParams) (Job, error)
 	GetJobForProject(ctx context.Context, arg GetJobForProjectParams) (Job, error)
 	GetProject(ctx context.Context, id uuid.UUID) (Project, error)
+	GetSchedule(ctx context.Context, arg GetScheduleParams) (Schedule, error)
 	GetSessionByTokenHash(ctx context.Context, tokenHash string) (Session, error)
 	GetUserByEmail(ctx context.Context, email string) (User, error)
 	GetUserByID(ctx context.Context, id uuid.UUID) (User, error)
@@ -63,12 +68,14 @@ type Querier interface {
 	GetWorkerTokenForProject(ctx context.Context, arg GetWorkerTokenForProjectParams) (WorkerToken, error)
 	ListAPIKeysByProject(ctx context.Context, projectID uuid.UUID) ([]ApiKey, error)
 	ListActiveWorkerPools(ctx context.Context) ([]WorkerPool, error)
+	ListDueSchedules(ctx context.Context, limit int32) ([]Schedule, error)
 	ListExecutionsByJob(ctx context.Context, jobID uuid.UUID) ([]Execution, error)
 	ListExpiredExecutions(ctx context.Context, limit int32) ([]Execution, error)
 	ListInvites(ctx context.Context, limit int32) ([]Invite, error)
 	ListJobsByProject(ctx context.Context, arg ListJobsByProjectParams) ([]Job, error)
 	ListPendingOutboxMessages(ctx context.Context, limit int32) ([]OutboxMessage, error)
 	ListProjectsByUser(ctx context.Context, userID uuid.UUID) ([]Project, error)
+	ListSchedulesByProject(ctx context.Context, projectID uuid.UUID) ([]Schedule, error)
 	ListWorkerPoolsByProject(ctx context.Context, projectID uuid.UUID) ([]WorkerPool, error)
 	ListWorkerTokensByProject(ctx context.Context, projectID uuid.UUID) ([]WorkerToken, error)
 	ListWorkersByProject(ctx context.Context, projectID uuid.UUID) ([]Worker, error)
@@ -95,6 +102,7 @@ type Querier interface {
 	UpdateAPIKeyHash(ctx context.Context, arg UpdateAPIKeyHashParams) error
 	UpdateJobStatus(ctx context.Context, arg UpdateJobStatusParams) (Job, error)
 	UpdateProject(ctx context.Context, arg UpdateProjectParams) (Project, error)
+	UpdateSchedule(ctx context.Context, arg UpdateScheduleParams) (Schedule, error)
 	UpdateWorkerHeartbeat(ctx context.Context, id uuid.UUID) (Worker, error)
 	UpdateWorkerPool(ctx context.Context, arg UpdateWorkerPoolParams) (WorkerPool, error)
 }

@@ -161,6 +161,7 @@ func (b *RemoteBackend) Fail(ctx context.Context, claim execution.Claim, cause e
 		"execution_id": claim.Execution.ID,
 		"error":        message,
 		"cancelled":    cancelled,
+		"permanent":    execution.IsPermanent(cause),
 	}, &response); err != nil {
 		return execution.FailureOutcome{}, err
 	}

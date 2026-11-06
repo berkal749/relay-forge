@@ -88,6 +88,24 @@ type Project struct {
 	DefaultJobTimeoutSeconds int32      `json:"default_job_timeout_seconds"`
 }
 
+type Schedule struct {
+	ID          uuid.UUID  `json:"id"`
+	ProjectID   uuid.UUID  `json:"project_id"`
+	Name        string     `json:"name"`
+	Cron        string     `json:"cron"`
+	Timezone    string     `json:"timezone"`
+	Enabled     bool       `json:"enabled"`
+	JobType     string     `json:"job_type"`
+	QueueName   string     `json:"queue_name"`
+	Payload     []byte     `json:"payload"`
+	Priority    int32      `json:"priority"`
+	MaxAttempts int32      `json:"max_attempts"`
+	NextRunAt   time.Time  `json:"next_run_at"`
+	LastRunAt   *time.Time `json:"last_run_at"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
 type Session struct {
 	ID        uuid.UUID  `json:"id"`
 	UserID    uuid.UUID  `json:"user_id"`

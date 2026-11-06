@@ -153,6 +153,7 @@ Per-account and per-project limits are enforced at creation time and re-checked 
 | `MAX_ACTIVE_POOLS_PER_PROJECT` | `5` |
 | `MAX_WORKER_CONCURRENCY_PER_PROJECT` | `50` |
 | `MAX_QUEUED_JOBS_PER_PROJECT` | `100000` |
+| `MAX_SCHEDULES_PER_PROJECT` | `50` |
 
 ### Projects
 
@@ -291,7 +292,7 @@ The API also owns the outbox dispatcher (`API_OUTBOX_INTERVAL`) and retention cl
 
 Pool `allowed_cidrs` are enforced on register, claim, heartbeat, and completion. Set `TRUST_PROXY_HEADERS=true` only behind a trusted reverse proxy so `X-Forwarded-For`/`X-Real-IP` can be used for the client address. Set `WORKER_MTLS_HEADER` to a header injected by a trusted proxy (for example `X-Client-Cert-Fingerprint`) to require a client certificate identity. mTLS itself terminates at the proxy/ingress.
 
-Workers can load pool-local secrets from `WORKER_SECRETS_FILE` (a JSON object of environment variable names to values) and restrict outbound HTTP for handlers that use `execution.NewAllowlistedClient` via `WORKER_EGRESS_ALLOWLIST` (comma-separated hosts, exact or `*.example.com`). Secrets and egress rules stay on the worker host.
+Workers can load pool-local secrets from `WORKER_SECRETS_FILE` (a JSON object of environment variable names to values) and restrict outbound HTTP for the built-in handlers via `WORKER_EGRESS_ALLOWLIST` (comma-separated hosts, exact or `*.example.com`). Secrets and egress rules stay on the worker host.
 
 API keys use the `rf_live_` prefix and are returned only once at creation. Keys are hashed at rest with HMAC-SHA256 using `API_KEY_PEPPER`, and the dashboard shows only a short `key_prefix`. Key creation accepts an optional `expires_in_days` (1–3650); omitted keys never expire. `last_used_at` is updated at most once per minute during authentication.
 
@@ -311,8 +312,8 @@ Set `API_KEY_PEPPER` to a long random value. A development fallback is used when
 ```json
 {
   "queue_name": "default",
-  "job_type": "send_email",
-  "payload": {"user_id": "123"},
+  "job_type": "http.request",
+  "payload": {"url": "https://api.example.com/hooks/new-user"},
   "priority": 10,
   "max_attempts": 3,
   "scheduled_at": "2026-11-05T20:00:00Z"
@@ -322,6 +323,117 @@ Set `API_KEY_PEPPER` to a long random value. A development fallback is used when
 `queue_name`, `payload`, `priority`, `max_attempts`, and `scheduled_at` are optional. When `queue_name`, `priority`, or `max_attempts` are omitted, the project's defaults are used. Payloads must be valid, non-null JSON and at most 256 KiB.
 
 Job submission is idempotent when the request includes an `Idempotency-Key` header (1–255 printable characters). Replaying the same key and request returns the original job with `200 OK` and `Idempotent-Replayed: true`; reusing the key with a different request returns `409 Conflict`. Keys are scoped per project and follow the job retention window: once the original job is purged, its idempotency key can be reused. Jobs are created with the outbox message in one transaction. The worker dispatches pending outbox messages and emits a `relayforge_jobs` PostgreSQL notification containing the job ID. See [docs/job-lifecycle.md](docs/job-lifecycle.md) for statuses and transitions.
+
+### Built-in job types
+
+Workers ship with handlers for the common integration patterns. Payloads are validated before any outbound call, and every handler reports terminal (non-retryable) failures separately from retryable ones.
+
+#### `http.request` — outbound HTTP / webhooks
+
+```json
+{
+  "job_type": "http.request",
+  "payload": {
+    "url": "https://api.example.com/hooks/build",
+    "method": "POST",
+    "headers": {"Authorization": "Bearer secret"},
+    "body": {"build_id": 42, "status": "done"},
+    "timeout_seconds": 20
+  }
+}
+```
+
+| Field | Description |
+| --- | --- |
+| `url` | Required. `http` or `https`; embedded credentials are rejected. |
+| `method` | Default `POST`. GET/HEAD/POST/PUT/PATCH/DELETE/OPTIONS. |
+| `headers` | Optional map. `Host`, `Content-Length`, and hop-by-hop headers cannot be overridden. |
+| `body` | Optional JSON value, sent with `application/json`. |
+| `body_template` | Optional raw string body. Supports `{{job_id}}`, `{{project_id}}`, `{{job_type}}`, `{{queue_name}}`, `{{attempt}}`, `{{max_attempts}}`, and entries from `variables`. |
+| `variables` | Optional map used by templates. String values are JSON-escaped. |
+| `timeout_seconds` | Per-request timeout, capped at 300 seconds. |
+| `allow_non_2xx` | When true, a 4xx/5xx response is recorded as a successful result instead of a failure. |
+
+The handler returns the status, selected headers, up to 16 KiB of the response body, and the duration. `5xx`, `408`, `425`, `429`, and network failures are retried according to the job's policy. Other `4xx` responses and malformed payloads fail immediately. A retry repeats the outbound call, so webhook endpoints should be idempotent or use a stable identifier from the template (for example `{{job_id}}`).
+
+Outbound requests honour `WORKER_EGRESS_ALLOWLIST` and refuse loopback, private, link-local, and multicast addresses unless `WORKER_ALLOW_PRIVATE_EGRESS=true`. The address check runs at dial time, so redirects and DNS rebinding are covered too.
+
+#### `delay.run` — schedule another job
+
+```json
+{
+  "job_type": "delay.run",
+  "payload": {
+    "delay_seconds": 900,
+    "job": {
+      "job_type": "http.request",
+      "queue_name": "webhooks",
+      "payload": {"url": "https://api.example.com/reminder"},
+      "max_attempts": 5
+    }
+  }
+}
+```
+
+Use `delay_seconds` (up to 30 days) or `run_at` (an RFC 3339 timestamp within one year). The follow-up job is submitted with `delay:<job-id>` as its idempotency key, so retrying the delay never duplicates the target. Remote workers submit through `POST /v1/workers/jobs`; direct workers write through the job service.
+
+#### Notifications
+
+| Job type | Required fields | Credentials |
+| --- | --- | --- |
+| `notify.email` | `to`, `subject`, and `text` or `html` | `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM`, optional `SMTP_USERNAME`/`SMTP_PASSWORD`, `SMTP_TLS` |
+| `notify.slack` | `text` (or `content`/`blocks`) and `webhook_url` | Optional default `SLACK_WEBHOOK_URL` |
+| `notify.discord` | `content` (or `embeds`) and `webhook_url` | Optional default `DISCORD_WEBHOOK_URL` |
+| `notify.telegram` | `chat_id` and `text` | `TELEGRAM_BOT_TOKEN` |
+| `notify.sms` | `to` and `body` | `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `TWILIO_FROM_NUMBER` (or `from`) |
+
+```json
+{
+  "job_type": "notify.slack",
+  "payload": {"text": "Deploy finished", "webhook_url": "https://hooks.slack.com/services/..."}
+}
+```
+
+```json
+{
+  "job_type": "notify.email",
+  "payload": {
+    "to": ["person@example.com"],
+    "subject": "Nightly report",
+    "text": "Everything is green.",
+    "html": "<p>Everything is green.</p>"
+  }
+}
+```
+
+Email supports multiple `to`/`cc`/`bcc` recipients and multipart text+HTML. Notification credentials live in the worker environment or `WORKER_SECRETS_FILE`, never in the database. Per-job `webhook_url` and Twilio `from` values override the operator defaults. Missing credentials and most provider `4xx` responses are terminal; `5xx`, `429`, and network errors retry.
+
+#### Cron schedules
+
+Schedules are stored in PostgreSQL and evaluated by the API, independent of worker availability. Each due schedule submits a job from its template.
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `POST` | `/v1/projects/{projectID}/schedules` | Create a schedule |
+| `GET` | `/v1/projects/{projectID}/schedules` | List schedules |
+| `PATCH` | `/v1/projects/{projectID}/schedules/{scheduleID}` | Update or pause a schedule |
+| `DELETE` | `/v1/projects/{projectID}/schedules/{scheduleID}` | Delete a schedule |
+
+```json
+{
+  "name": "nightly-report",
+  "cron": "0 2 * * *",
+  "timezone": "Europe/Berlin",
+  "job_type": "http.request",
+  "queue_name": "default",
+  "payload": {"url": "https://api.example.com/reports/nightly"},
+  "priority": 0,
+  "max_attempts": 3,
+  "enabled": true
+}
+```
+
+Cron uses the standard five-field syntax (minute, hour, day of month, month, day of week) plus descriptors such as `@daily`. Times are evaluated in the schedule's IANA timezone. `MAX_SCHEDULES_PER_PROJECT` caps schedule count, `API_SCHEDULER_INTERVAL` controls how often the API looks for due schedules, and the dashboard project page has a schedules panel. Submissions use `schedule:<id>:<run-time>` as the idempotency key, and schedules advance with an optimistic update, so multiple API instances can run the scheduler safely.
 
 ### Rate limits
 
@@ -356,7 +468,7 @@ The worker:
 - Drains in-flight work during graceful shutdown
 - Sends worker heartbeats and marks itself offline on exit
 
-The development handlers are `echo`, `noop`, and `sleep`. Register production handlers in `cmd/worker/main.go`.
+Built-in handlers cover `http.request`, `delay.run`, and `notify.*`; `echo`, `noop`, and `sleep` remain for development. Add custom handlers in `internal/action/registry.go` (or register them in `cmd/worker/main.go`) before building the worker image.
 
 With Docker Compose, start a standalone worker with the `worker` profile, or let the supervisor manage all active pools with the `supervisor` profile:
 

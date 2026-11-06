@@ -17,6 +17,7 @@ import { ApiKeyPanel } from "@/components/api-key-panel"
 import { JobTable } from "@/components/job-table"
 import { ProjectSettingsDialog } from "@/components/project-settings-dialog"
 import { SubmitJobForm } from "@/components/submit-job-form"
+import { SchedulePanel } from "@/components/schedule-panel"
 import { WorkerFleetPanel } from "@/components/worker-fleet-panel"
 import { WorkerPoolPanel } from "@/components/worker-pool-panel"
 import { WorkerTokenPanel } from "@/components/worker-token-panel"
@@ -237,6 +238,7 @@ export function ProjectPage() {
           <ApiKeyPanel projectId={project.id} />
           <WorkerFleetPanel projectId={project.id} />
           <WorkerPoolPanel projectId={project.id} />
+          <SchedulePanel projectId={project.id} />
           <WorkerTokenPanel projectId={project.id} />
         </div>
       </div>

@@ -42,6 +42,27 @@ type Config struct {
 	MetricsAddr    string
 	MetricsEnabled bool
 
+	APISchedulerInterval   time.Duration
+	MaxSchedulesPerProject int
+
+	WorkerAllowPrivateEgress bool
+	ActionHTTPTimeout        time.Duration
+
+	SMTPHost     string
+	SMTPPort     int
+	SMTPUsername string
+	SMTPPassword string
+	SMTPFrom     string
+	SMTPTLS      string
+
+	SlackWebhookURL   string
+	DiscordWebhookURL string
+	TelegramBotToken  string
+
+	TwilioAccountSID string
+	TwilioAuthToken  string
+	TwilioFromNumber string
+
 	DatabaseURLExplicit bool
 	APIBaseURLExplicit  bool
 
@@ -296,6 +317,42 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	apiSchedulerInterval, err := envDuration("API_SCHEDULER_INTERVAL", 15*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	maxSchedulesPerProject, err := envNonNegativeInt("MAX_SCHEDULES_PER_PROJECT", 50)
+	if err != nil {
+		return Config{}, err
+	}
+
+	workerAllowPrivateEgress, err := envBool("WORKER_ALLOW_PRIVATE_EGRESS", false)
+	if err != nil {
+		return Config{}, err
+	}
+	actionHTTPTimeout, err := envDuration("ACTION_HTTP_TIMEOUT", 30*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	if actionHTTPTimeout < time.Second || actionHTTPTimeout > 5*time.Minute {
+		return Config{}, fmt.Errorf("ACTION_HTTP_TIMEOUT must be between 1s and 5m")
+	}
+
+	smtpPort, err := envInt("SMTP_PORT", 587)
+	if err != nil {
+		return Config{}, err
+	}
+	if smtpPort < 1 || smtpPort > 65535 {
+		return Config{}, fmt.Errorf("SMTP_PORT must be between 1 and 65535")
+	}
+	smtpTLS := strings.ToLower(strings.TrimSpace(os.Getenv("SMTP_TLS")))
+	if smtpTLS == "" {
+		smtpTLS = "starttls"
+	}
+	if smtpTLS != "starttls" && smtpTLS != "tls" && smtpTLS != "none" {
+		return Config{}, fmt.Errorf("SMTP_TLS must be starttls, tls, or none")
+	}
+
 	metricsAddr := os.Getenv("METRICS_ADDR")
 	if metricsAddr == "" {
 		metricsAddr = ":9090"
@@ -348,6 +405,27 @@ func Load() (Config, error) {
 
 		MetricsAddr:    metricsAddr,
 		MetricsEnabled: metricsEnabled,
+
+		APISchedulerInterval:   apiSchedulerInterval,
+		MaxSchedulesPerProject: maxSchedulesPerProject,
+
+		WorkerAllowPrivateEgress: workerAllowPrivateEgress,
+		ActionHTTPTimeout:        actionHTTPTimeout,
+
+		SMTPHost:     os.Getenv("SMTP_HOST"),
+		SMTPPort:     smtpPort,
+		SMTPUsername: os.Getenv("SMTP_USERNAME"),
+		SMTPPassword: os.Getenv("SMTP_PASSWORD"),
+		SMTPFrom:     os.Getenv("SMTP_FROM"),
+		SMTPTLS:      smtpTLS,
+
+		SlackWebhookURL:   os.Getenv("SLACK_WEBHOOK_URL"),
+		DiscordWebhookURL: os.Getenv("DISCORD_WEBHOOK_URL"),
+		TelegramBotToken:  os.Getenv("TELEGRAM_BOT_TOKEN"),
+
+		TwilioAccountSID: os.Getenv("TWILIO_ACCOUNT_SID"),
+		TwilioAuthToken:  os.Getenv("TWILIO_AUTH_TOKEN"),
+		TwilioFromNumber: os.Getenv("TWILIO_FROM_NUMBER"),
 
 		APIBaseURLExplicit:      apiBaseURLExplicit,
 		WorkerMode:              workerMode,
@@ -408,6 +486,18 @@ func envInt(name string, fallback int) (int, error) {
 	parsed, err := strconv.Atoi(value)
 	if err != nil {
 		return 0, fmt.Errorf("parse %s: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func envBool(name string, fallback bool) (bool, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("parse %s: %w", name, err)
 	}
 	return parsed, nil
 }
@@ -500,5 +590,9 @@ func (c Config) LogArgs() []any {
 		"max_active_pools_per_project", c.MaxActivePoolsPerProject,
 		"max_worker_concurrency_per_project", c.MaxWorkerConcurrencyPerProject,
 		"max_queued_jobs_per_project", c.MaxQueuedJobsPerProject,
+		"max_schedules_per_project", c.MaxSchedulesPerProject,
+		"api_scheduler_interval", c.APISchedulerInterval,
+		"action_http_timeout", c.ActionHTTPTimeout,
+		"allow_private_egress", c.WorkerAllowPrivateEgress,
 	}
 }

@@ -76,6 +76,57 @@ workers. The project page shows current usage against each limit.
 | `MAX_ACTIVE_POOLS_PER_PROJECT` | 5 | create/update + supervisor |
 | `MAX_WORKER_CONCURRENCY_PER_PROJECT` | 50 | create/update + supervisor |
 | `MAX_QUEUED_JOBS_PER_PROJECT` | 100000 | `job.Service.Submit` |
+| `MAX_SCHEDULES_PER_PROJECT` | 50 | `schedule.Service.Create` |
+
+## Built-in actions and credentials
+
+Workers include `http.request`, `delay.run`, `notify.email`, `notify.slack`,
+`notify.discord`, `notify.telegram`, and `notify.sms` handlers. Credentials are
+operator-wide and belong in the worker environment or `WORKER_SECRETS_FILE`:
+
+```sh
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USERNAME=...
+SMTP_PASSWORD=...
+SMTP_FROM="RelayForge <jobs@example.com>"
+SMTP_TLS=starttls            # starttls | tls | none
+SLACK_WEBHOOK_URL=
+DISCORD_WEBHOOK_URL=
+TELEGRAM_BOT_TOKEN=
+TWILIO_ACCOUNT_SID=
+TWILIO_AUTH_TOKEN=
+TWILIO_FROM_NUMBER=
+```
+
+They never enter the database. Customers select destinations and content in job
+payloads; per-job Slack/Discord webhooks and Twilio `from` values override the
+defaults.
+
+Outbound HTTP is restricted by `WORKER_EGRESS_ALLOWLIST` (exact hosts or
+`*.example.com`). Loopback, private, link-local, and multicast destinations are
+refused unless `WORKER_ALLOW_PRIVATE_EGRESS=true`; the check runs when the
+connection is dialled, so redirects and DNS rebinding are covered. Use the
+private-egress flag only for intentionally internal webhooks.
+
+`5xx`, `408`, `425`, `429`, and network errors retry under the job policy. Most
+`4xx` responses and invalid payloads are terminal, so a bad request does not
+burn through attempts.
+
+## Schedules
+
+Cron schedules live in the `schedules` table and are evaluated by the API every
+`API_SCHEDULER_INTERVAL` (default 15s). They are independent of worker
+availability: a due schedule submits a job, then advances `next_run_at`.
+`MAX_SCHEDULES_PER_PROJECT` (default 50) caps them per project, and the project
+dashboard has a schedules panel.
+
+Cron uses five fields (minute, hour, day of month, month, day of week) or
+descriptors such as `@daily`, evaluated in the schedule's IANA timezone.
+Submissions use `schedule:<id>:<run-time>` as the idempotency key, and advancing
+is optimistic, so multiple API replicas can run the scheduler safely. After
+scheduler downtime one job is submitted per schedule on the next tick; there is
+no missed-run burst.
 
 ## TLS and networking
 

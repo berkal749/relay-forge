@@ -50,13 +50,15 @@ type allowlistTransport struct {
 
 func (t *allowlistTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	host := strings.ToLower(request.URL.Hostname())
-	if !hostAllowed(host, t.allowed) {
+	if !HostAllowed(host, t.allowed) {
 		return nil, fmt.Errorf("egress to %s is not allowed by WORKER_EGRESS_ALLOWLIST", host)
 	}
 	return t.base.RoundTrip(request)
 }
 
-func hostAllowed(host string, allowed []string) bool {
+// HostAllowed reports whether host matches an allowlist entry. Entries may be
+// exact hosts or a leading wildcard such as *.example.com.
+func HostAllowed(host string, allowed []string) bool {
 	for _, entry := range allowed {
 		if entry == host {
 			return true

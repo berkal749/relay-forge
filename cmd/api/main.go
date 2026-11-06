@@ -25,6 +25,7 @@ import (
 	"relayforge/internal/middleware"
 	"relayforge/internal/outbox"
 	"relayforge/internal/project"
+	"relayforge/internal/schedule"
 	"relayforge/internal/workerpool"
 	"relayforge/internal/workertoken"
 )
@@ -74,6 +75,9 @@ func run() error {
 		MaxQueuedJobsPerProject: cfg.MaxQueuedJobsPerProject,
 	})
 	inviteService := invite.NewService(queries, cfg.InviteTTL)
+	scheduleService := schedule.NewService(queries, jobService, projectService, schedule.Limits{
+		MaxSchedulesPerProject: cfg.MaxSchedulesPerProject,
+	})
 	appMetrics := metrics.New()
 
 	slog.Info("API configuration", cfg.LogArgs()...)
@@ -93,7 +97,8 @@ func run() error {
 		WorkerTokens: handlers.NewWorkerTokenHandler(workerTokenService, cfg.TokenRotationGrace),
 		WorkerPools:  handlers.NewWorkerPoolHandler(workerPoolService),
 		Enrollment:   handlers.NewEnrollmentHandler(workerTokenService),
-		WorkerRemote: handlers.NewWorkerRemoteHandler(queries, executionService, handlers.WorkerRemoteConfig{
+		Schedules:    handlers.NewScheduleHandler(scheduleService),
+		WorkerRemote: handlers.NewWorkerRemoteHandler(queries, executionService, jobService, handlers.WorkerRemoteConfig{
 			LeaseGrace:        cfg.WorkerLeaseGrace,
 			TrustProxyHeaders: cfg.TrustProxyHeaders,
 			MTLSHeader:        cfg.WorkerMTLSHeader,
@@ -144,6 +149,9 @@ func run() error {
 	startBackground(&background, func() {
 		runMetricsCollector(backgroundCtx, queries, appMetrics)
 	})
+	startBackground(&background, func() {
+		runScheduler(backgroundCtx, scheduleService, cfg.APISchedulerInterval)
+	})
 
 	var metricsServer *http.Server
 	if cfg.MetricsEnabled {
@@ -188,6 +196,31 @@ func run() error {
 	cancelBackground()
 	background.Wait()
 	return err
+}
+
+func runScheduler(ctx context.Context, service *schedule.Service, interval time.Duration) {
+	if interval <= 0 {
+		interval = 15 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		submitted, err := service.RunDue(ctx)
+		if err != nil {
+			if ctx.Err() == nil {
+				slog.Error("scheduler tick failed", "error", err)
+			}
+		} else if submitted > 0 {
+			slog.Info("scheduler submitted jobs", "count", submitted)
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func startBackground(group *sync.WaitGroup, run func()) {
