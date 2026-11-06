@@ -20,8 +20,6 @@ services:
   api:
     build:
       context: .
-      args:
-        TARGET: api
     restart: unless-stopped
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-relayforge}:${POSTGRES_PASSWORD:-relayforge}@postgres:5432/${POSTGRES_DB:-relayforge}?sslmode=disable
@@ -35,6 +33,12 @@ services:
       RATE_LIMIT_JOB_SUBMIT_PER_MINUTE: ${RATE_LIMIT_JOB_SUBMIT_PER_MINUTE:-120}
     ports:
       - "${API_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
     depends_on:
       postgres:
         condition: service_healthy
@@ -42,8 +46,7 @@ services:
   worker:
     build:
       context: .
-      args:
-        TARGET: worker
+    entrypoint: ["/usr/local/bin/relayforge-worker"]
     profiles: ["worker"]
     restart: unless-stopped
     environment:
@@ -52,6 +55,9 @@ services:
       WORKER_TOKEN_PEPPER: ${WORKER_TOKEN_PEPPER:-}
       WORKER_PROJECT_ID: ${WORKER_PROJECT_ID:-}
       WORKER_TOKEN: ${WORKER_TOKEN:-}
+      WORKER_TOKEN_FILE: ${WORKER_TOKEN_FILE:-/var/lib/relayforge/worker-token.json}
+      WORKER_ENROLLMENT_TOKEN: ${WORKER_ENROLLMENT_TOKEN:-}
+      RELAYFORGE_API_URL: http://api:8080
       WORKER_NAME: ${WORKER_NAME:-relayforge-worker}
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
       WORKER_POLL_INTERVAL: ${WORKER_POLL_INTERVAL:-1s}
@@ -61,9 +67,43 @@ services:
       WORKER_CLEANUP_INTERVAL: ${WORKER_CLEANUP_INTERVAL:-1h}
       RETRY_BASE_DELAY: ${RETRY_BASE_DELAY:-5s}
       RETRY_MAX_DELAY: ${RETRY_MAX_DELAY:-5m}
+    volumes:
+      - worker_state:/var/lib/relayforge
     depends_on:
       postgres:
         condition: service_healthy
 
+  supervisor:
+    build:
+      context: .
+    entrypoint: ["/usr/local/bin/relayforge-supervisor"]
+    profiles: ["supervisor"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-relayforge}:${POSTGRES_PASSWORD:-relayforge}@postgres:5432/${POSTGRES_DB:-relayforge}?sslmode=disable
+      API_KEY_PEPPER: ${API_KEY_PEPPER:-relayforge-development-pepper}
+      WORKER_TOKEN_PEPPER: ${WORKER_TOKEN_PEPPER:-}
+      RELAYFORGE_API_URL: http://api:8080
+      WORKER_ENROLLMENT_TTL: ${WORKER_ENROLLMENT_TTL:-15m}
+      SUPERVISOR_POLL_INTERVAL: ${SUPERVISOR_POLL_INTERVAL:-5s}
+      SUPERVISOR_WORKER_BINARY: /usr/local/bin/relayforge-worker
+      SUPERVISOR_TOKEN_DIR: /var/lib/relayforge/worker-tokens
+      WORKER_POLL_INTERVAL: ${WORKER_POLL_INTERVAL:-1s}
+      JOB_TIMEOUT: ${JOB_TIMEOUT:-5m}
+      WORKER_SHUTDOWN_TIMEOUT: ${WORKER_SHUTDOWN_TIMEOUT:-30s}
+      WORKER_HEARTBEAT_INTERVAL: ${WORKER_HEARTBEAT_INTERVAL:-15s}
+      WORKER_CLEANUP_INTERVAL: ${WORKER_CLEANUP_INTERVAL:-1h}
+      RETRY_BASE_DELAY: ${RETRY_BASE_DELAY:-5s}
+      RETRY_MAX_DELAY: ${RETRY_MAX_DELAY:-5m}
+    volumes:
+      - supervisor_state:/var/lib/relayforge
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
 volumes:
   postgres_data:
+  worker_state:
+  supervisor_state:

@@ -4,16 +4,57 @@ The worker is a project-scoped processing engine backed by PostgreSQL.
 
 ## Worker authentication
 
-Each worker must present a project worker token at startup:
+A worker resolves its identity in this order:
+
+1. `WORKER_TOKEN` with `WORKER_PROJECT_ID` (long-lived explicit token).
+2. `WORKER_TOKEN_FILE` (token cached by a previous enrollment).
+3. `WORKER_ENROLLMENT_TOKEN`, exchanged at `POST /v1/workers/enroll` for a pool-scoped token, then cached to `WORKER_TOKEN_FILE`.
 
 ```sh
-export WORKER_PROJECT_ID=<project-uuid>
-export WORKER_TOKEN=rf_worker_...
+export WORKER_ENROLLMENT_TOKEN=rf_enroll_...
+export WORKER_TOKEN_FILE=.relayforge/worker-token.json
+export RELAYFORGE_API_URL=http://localhost:8080
 ```
 
-The token is created through the dashboard or `POST /v1/projects/{projectID}/worker-tokens`. It is stored as an HMAC-SHA256 hash, may expire, and must belong to `WORKER_PROJECT_ID`. Successful startup records the token on the `workers` row and updates the token's `last_used_at`.
+Tokens are stored as HMAC-SHA256 hashes and may expire. An authenticated token must belong to the worker's project; if it belongs to a pool, the pool must be active. Successful startup records the token and pool on the `workers` row and updates `last_used_at`.
+
+Enrollment tokens use the `rf_enroll_` prefix, are single-use, and expire after 15 minutes by default. The raw worker token is written to the token file with `0600` permissions.
 
 This is application-level authorization. Workers still connect directly to PostgreSQL with `DATABASE_URL`; use per-worker database roles or network controls when a hard boundary is required.
+
+## Worker pools and supervisor
+
+`worker_pools` stores the desired worker configuration per project: name, concurrency, and `active`/`paused` status. Workers are not manually indexed against pools; the supervisor is the reconciler.
+
+```text
+worker_pools (active)
+       |
+       | reconcile every SUPERVISOR_POLL_INTERVAL
+       v
+issue rf_enroll_ token --> spawn relayforge-worker
+                              |
+                              | POST /v1/workers/enroll
+                              v
+                       pool-scoped rf_worker_ token
+                              |
+                              | cache to SUPERVISOR_TOKEN_DIR/pool-<id>.json
+                              v
+                       register + process jobs
+```
+
+The supervisor:
+
+- Starts one worker process per active pool and passes `WORKER_PROJECT_ID`, `WORKER_NAME`, and `WORKER_CONCURRENCY` from the pool row.
+- Restarts a worker when the pool name or concurrency changes.
+- Stops the worker when the pool is paused or deleted.
+- Reissues an enrollment token on every spawn; cached tokens are reused when still valid.
+- Shuts down children with `SIGTERM` and waits up to 60 seconds before killing them.
+
+Set `SUPERVISOR_WORKER_BINARY` to the worker binary path and `SUPERVISOR_TOKEN_DIR` to a writable persistent directory. With Docker Compose:
+
+```sh
+docker compose --profile supervisor up -d
+```
 
 ## Processing flow
 
@@ -114,9 +155,14 @@ The built-in `echo`, `noop`, and `sleep` handlers exist for development and test
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `WORKER_PROJECT_ID` | required | Project UUID claimed by this worker |
-| `WORKER_NAME` | generated | Worker display name |
-| `WORKER_CONCURRENCY` | `4` | Number of concurrent job workers |
+| `WORKER_PROJECT_ID` | required with `WORKER_TOKEN` | Project UUID claimed by this worker |
+| `WORKER_TOKEN` | — | Explicit long-lived worker token |
+| `WORKER_TOKEN_FILE` | `.relayforge/worker-token.json` | Cached token written after enrollment |
+| `WORKER_ENROLLMENT_TOKEN` | — | Single-use `rf_enroll_` bootstrap token |
+| `RELAYFORGE_API_URL` | `http://localhost:8080` | API used for enrollment |
+| `WORKER_ENROLLMENT_TTL` | `15m` | Enrollment token lifetime (1m–24h) |
+| `WORKER_NAME` | generated | Worker display name (pool name overrides) |
+| `WORKER_CONCURRENCY` | `4` | Number of concurrent job workers (pool overrides) |
 | `WORKER_POLL_INTERVAL` | `1s` | Delay when no jobs are available |
 | `JOB_TIMEOUT` | `5m` | Maximum handler execution time |
 | `WORKER_SHUTDOWN_TIMEOUT` | `30s` | Grace period for in-flight jobs |
@@ -124,3 +170,11 @@ The built-in `echo`, `noop`, and `sleep` handlers exist for development and test
 | `WORKER_CLEANUP_INTERVAL` | `1h` | How often expired jobs are purged |
 | `RETRY_BASE_DELAY` | `5s` | Initial retry delay |
 | `RETRY_MAX_DELAY` | `5m` | Maximum retry delay |
+
+Supervisor variables:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `SUPERVISOR_POLL_INTERVAL` | `5s` | How often active pools are reconciled |
+| `SUPERVISOR_WORKER_BINARY` | `relayforge-worker` | Worker executable to spawn |
+| `SUPERVISOR_TOKEN_DIR` | `.relayforge/worker-tokens` | Per-pool cached token directory |

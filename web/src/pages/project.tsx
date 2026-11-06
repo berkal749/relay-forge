@@ -17,6 +17,7 @@ import { ApiKeyPanel } from "@/components/api-key-panel"
 import { JobTable } from "@/components/job-table"
 import { ProjectSettingsDialog } from "@/components/project-settings-dialog"
 import { SubmitJobForm } from "@/components/submit-job-form"
+import { WorkerPoolPanel } from "@/components/worker-pool-panel"
 import { WorkerTokenPanel } from "@/components/worker-token-panel"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
@@ -204,6 +205,7 @@ export function ProjectPage() {
 
         <div className="space-y-6">
           <ApiKeyPanel projectId={project.id} />
+          <WorkerPoolPanel projectId={project.id} />
           <WorkerTokenPanel projectId={project.id} />
         </div>
       </div>

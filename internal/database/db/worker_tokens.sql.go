@@ -12,14 +12,45 @@ import (
 	"github.com/google/uuid"
 )
 
+const consumeEnrollmentToken = `-- name: ConsumeEnrollmentToken :one
+UPDATE worker_tokens
+SET consumed_at = now()
+WHERE id = $1
+  AND kind = 'enrollment'
+  AND consumed_at IS NULL
+RETURNING id, project_id, token_hash, token_prefix, name, revoked_at, expires_at, last_used_at, created_at, pool_id, kind, consumed_at
+`
+
+func (q *Queries) ConsumeEnrollmentToken(ctx context.Context, id uuid.UUID) (WorkerToken, error) {
+	row := q.db.QueryRow(ctx, consumeEnrollmentToken, id)
+	var i WorkerToken
+	err := row.Scan(
+		&i.ID,
+		&i.ProjectID,
+		&i.TokenHash,
+		&i.TokenPrefix,
+		&i.Name,
+		&i.RevokedAt,
+		&i.ExpiresAt,
+		&i.LastUsedAt,
+		&i.CreatedAt,
+		&i.PoolID,
+		&i.Kind,
+		&i.ConsumedAt,
+	)
+	return i, err
+}
+
 const createWorkerToken = `-- name: CreateWorkerToken :one
-INSERT INTO worker_tokens (project_id, token_hash, token_prefix, name, expires_at)
-VALUES ($1, $2, $3, $4, $5)
-RETURNING id, project_id, token_hash, token_prefix, name, revoked_at, expires_at, last_used_at, created_at
+INSERT INTO worker_tokens (project_id, pool_id, kind, token_hash, token_prefix, name, expires_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING id, project_id, token_hash, token_prefix, name, revoked_at, expires_at, last_used_at, created_at, pool_id, kind, consumed_at
 `
 
 type CreateWorkerTokenParams struct {
 	ProjectID   uuid.UUID  `json:"project_id"`
+	PoolID      *uuid.UUID `json:"pool_id"`
+	Kind        string     `json:"kind"`
 	TokenHash   string     `json:"token_hash"`
 	TokenPrefix string     `json:"token_prefix"`
 	Name        string     `json:"name"`
@@ -29,6 +60,8 @@ type CreateWorkerTokenParams struct {
 func (q *Queries) CreateWorkerToken(ctx context.Context, arg CreateWorkerTokenParams) (WorkerToken, error) {
 	row := q.db.QueryRow(ctx, createWorkerToken,
 		arg.ProjectID,
+		arg.PoolID,
+		arg.Kind,
 		arg.TokenHash,
 		arg.TokenPrefix,
 		arg.Name,
@@ -45,15 +78,56 @@ func (q *Queries) CreateWorkerToken(ctx context.Context, arg CreateWorkerTokenPa
 		&i.ExpiresAt,
 		&i.LastUsedAt,
 		&i.CreatedAt,
+		&i.PoolID,
+		&i.Kind,
+		&i.ConsumedAt,
+	)
+	return i, err
+}
+
+const getEnrollmentTokenByHash = `-- name: GetEnrollmentTokenByHash :one
+SELECT worker_tokens.id, worker_tokens.project_id, worker_tokens.token_hash, worker_tokens.token_prefix, worker_tokens.name, worker_tokens.revoked_at, worker_tokens.expires_at, worker_tokens.last_used_at, worker_tokens.created_at, worker_tokens.pool_id, worker_tokens.kind, worker_tokens.consumed_at FROM worker_tokens
+JOIN worker_pools ON worker_pools.id = worker_tokens.pool_id
+JOIN projects ON projects.id = worker_tokens.project_id
+WHERE worker_tokens.token_hash = $1
+  AND worker_tokens.kind = 'enrollment'
+  AND worker_tokens.revoked_at IS NULL
+  AND worker_tokens.consumed_at IS NULL
+  AND (worker_tokens.expires_at IS NULL OR worker_tokens.expires_at > now())
+  AND worker_pools.status = 'active'
+  AND projects.archived_at IS NULL
+`
+
+func (q *Queries) GetEnrollmentTokenByHash(ctx context.Context, tokenHash string) (WorkerToken, error) {
+	row := q.db.QueryRow(ctx, getEnrollmentTokenByHash, tokenHash)
+	var i WorkerToken
+	err := row.Scan(
+		&i.ID,
+		&i.ProjectID,
+		&i.TokenHash,
+		&i.TokenPrefix,
+		&i.Name,
+		&i.RevokedAt,
+		&i.ExpiresAt,
+		&i.LastUsedAt,
+		&i.CreatedAt,
+		&i.PoolID,
+		&i.Kind,
+		&i.ConsumedAt,
 	)
 	return i, err
 }
 
 const getWorkerTokenByHash = `-- name: GetWorkerTokenByHash :one
-SELECT id, project_id, token_hash, token_prefix, name, revoked_at, expires_at, last_used_at, created_at FROM worker_tokens
-WHERE token_hash = $1
-  AND revoked_at IS NULL
-  AND (expires_at IS NULL OR expires_at > now())
+SELECT worker_tokens.id, worker_tokens.project_id, worker_tokens.token_hash, worker_tokens.token_prefix, worker_tokens.name, worker_tokens.revoked_at, worker_tokens.expires_at, worker_tokens.last_used_at, worker_tokens.created_at, worker_tokens.pool_id, worker_tokens.kind, worker_tokens.consumed_at FROM worker_tokens
+JOIN projects ON projects.id = worker_tokens.project_id
+LEFT JOIN worker_pools ON worker_pools.id = worker_tokens.pool_id
+WHERE worker_tokens.token_hash = $1
+  AND worker_tokens.kind = 'worker'
+  AND worker_tokens.revoked_at IS NULL
+  AND (worker_tokens.expires_at IS NULL OR worker_tokens.expires_at > now())
+  AND projects.archived_at IS NULL
+  AND (worker_pools.id IS NULL OR worker_pools.status = 'active')
 `
 
 func (q *Queries) GetWorkerTokenByHash(ctx context.Context, tokenHash string) (WorkerToken, error) {
@@ -69,13 +143,17 @@ func (q *Queries) GetWorkerTokenByHash(ctx context.Context, tokenHash string) (W
 		&i.ExpiresAt,
 		&i.LastUsedAt,
 		&i.CreatedAt,
+		&i.PoolID,
+		&i.Kind,
+		&i.ConsumedAt,
 	)
 	return i, err
 }
 
 const listWorkerTokensByProject = `-- name: ListWorkerTokensByProject :many
-SELECT id, project_id, token_hash, token_prefix, name, revoked_at, expires_at, last_used_at, created_at FROM worker_tokens
+SELECT id, project_id, token_hash, token_prefix, name, revoked_at, expires_at, last_used_at, created_at, pool_id, kind, consumed_at FROM worker_tokens
 WHERE project_id = $1
+  AND kind = 'worker'
 ORDER BY created_at DESC
 `
 
@@ -98,6 +176,9 @@ func (q *Queries) ListWorkerTokensByProject(ctx context.Context, projectID uuid.
 			&i.ExpiresAt,
 			&i.LastUsedAt,
 			&i.CreatedAt,
+			&i.PoolID,
+			&i.Kind,
+			&i.ConsumedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -113,7 +194,7 @@ const revokeWorkerToken = `-- name: RevokeWorkerToken :one
 UPDATE worker_tokens
 SET revoked_at = now()
 WHERE id = $1 AND project_id = $2 AND revoked_at IS NULL
-RETURNING id, project_id, token_hash, token_prefix, name, revoked_at, expires_at, last_used_at, created_at
+RETURNING id, project_id, token_hash, token_prefix, name, revoked_at, expires_at, last_used_at, created_at, pool_id, kind, consumed_at
 `
 
 type RevokeWorkerTokenParams struct {
@@ -134,6 +215,9 @@ func (q *Queries) RevokeWorkerToken(ctx context.Context, arg RevokeWorkerTokenPa
 		&i.ExpiresAt,
 		&i.LastUsedAt,
 		&i.CreatedAt,
+		&i.PoolID,
+		&i.Kind,
+		&i.ConsumedAt,
 	)
 	return i, err
 }

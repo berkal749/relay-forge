@@ -1,6 +1,6 @@
 -- name: CreateWorker :one
-INSERT INTO workers (project_id, worker_token_id, name, status)
-VALUES ($1, $2, $3, $4)
+INSERT INTO workers (project_id, worker_token_id, worker_pool_id, name, status)
+VALUES ($1, $2, $3, $4, $5)
 RETURNING *;
 
 -- name: GetWorker :one

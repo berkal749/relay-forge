@@ -99,6 +99,17 @@ type Worker struct {
 	LastHeartbeatAt *time.Time `json:"last_heartbeat_at"`
 	CreatedAt       time.Time  `json:"created_at"`
 	WorkerTokenID   *uuid.UUID `json:"worker_token_id"`
+	WorkerPoolID    *uuid.UUID `json:"worker_pool_id"`
+}
+
+type WorkerPool struct {
+	ID          uuid.UUID `json:"id"`
+	ProjectID   uuid.UUID `json:"project_id"`
+	Name        string    `json:"name"`
+	Concurrency int32     `json:"concurrency"`
+	Status      string    `json:"status"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 type WorkerToken struct {
@@ -111,4 +122,7 @@ type WorkerToken struct {
 	ExpiresAt   *time.Time `json:"expires_at"`
 	LastUsedAt  *time.Time `json:"last_used_at"`
 	CreatedAt   time.Time  `json:"created_at"`
+	PoolID      *uuid.UUID `json:"pool_id"`
+	Kind        string     `json:"kind"`
+	ConsumedAt  *time.Time `json:"consumed_at"`
 }

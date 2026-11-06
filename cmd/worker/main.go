@@ -10,8 +10,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
-
 	"relayforge/internal/config"
 	"relayforge/internal/database"
 	"relayforge/internal/database/db"
@@ -36,15 +34,8 @@ func run() error {
 		return err
 	}
 
-	if cfg.WorkerProjectID == "" {
+	if cfg.WorkerProjectID == "" && cfg.WorkerToken != "" {
 		return fmt.Errorf("WORKER_PROJECT_ID is required")
-	}
-	if cfg.WorkerToken == "" {
-		return fmt.Errorf("WORKER_TOKEN is required")
-	}
-	projectID, err := uuid.Parse(cfg.WorkerProjectID)
-	if err != nil {
-		return fmt.Errorf("parse WORKER_PROJECT_ID: %w", err)
 	}
 
 	connectCtx, cancelConnect := context.WithTimeout(context.Background(), cfg.DatabaseConnectTimeout)
@@ -59,12 +50,27 @@ func run() error {
 	queries := db.New(pool)
 	registerCtx, cancelRegister := context.WithTimeout(context.Background(), 10*time.Second)
 	tokenService := workertoken.NewService(queries, nil, cfg.WorkerTokenPepper)
-	workerToken, err := tokenService.Authenticate(registerCtx, projectID, cfg.WorkerToken)
+	credentials, err := worker.ResolveCredentials(registerCtx, queries, tokenService, worker.CredentialOptions{
+		ProjectID:       cfg.WorkerProjectID,
+		Token:           cfg.WorkerToken,
+		TokenFile:       cfg.WorkerTokenFile,
+		EnrollmentToken: cfg.WorkerEnrollmentToken,
+		APIBaseURL:      cfg.APIBaseURL,
+	})
 	if err != nil {
 		cancelRegister()
-		return fmt.Errorf("authenticate worker token: %w", err)
+		return fmt.Errorf("resolve worker credentials: %w", err)
 	}
-	workerRecord, err := worker.Register(registerCtx, queries, projectID, workerToken.ID, cfg.WorkerName)
+
+	projectID := credentials.ProjectID
+	workerName := cfg.WorkerName
+	concurrency := cfg.WorkerConcurrency
+	if credentials.Pool != nil {
+		workerName = credentials.Pool.Name
+		concurrency = int(credentials.Pool.Concurrency)
+	}
+
+	workerRecord, err := worker.Register(registerCtx, queries, projectID, credentials.Token.ID, credentials.Token.PoolID, workerName)
 	if err != nil {
 		cancelRegister()
 		return err
@@ -75,7 +81,6 @@ func run() error {
 		return fmt.Errorf("load project settings: %w", err)
 	}
 
-	concurrency := cfg.WorkerConcurrency
 	if projectRecord.MaxConcurrency > 0 && int(projectRecord.MaxConcurrency) < concurrency {
 		concurrency = int(projectRecord.MaxConcurrency)
 	}

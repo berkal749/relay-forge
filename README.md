@@ -8,7 +8,8 @@ Basic Go project template for the RelayForge API and worker.
 relayforge/
 ├── cmd/
 │   ├── api/              # API entrypoint
-│   └── worker/           # Worker entrypoint
+│   ├── worker/           # Worker entrypoint
+│   └── supervisor/       # Worker pool supervisor entrypoint
 ├── internal/             # Application packages
 │   ├── config/
 │   ├── database/
@@ -18,6 +19,10 @@ relayforge/
 │   ├── job/
 │   ├── queue/
 │   ├── worker/
+│   ├── workerpool/
+│   ├── supervisor/
+│   ├── workertoken/
+│   ├── secret/
 │   ├── execution/
 │   ├── middleware/
 │   └── http/
@@ -60,6 +65,7 @@ make build
 make test
 make fmt
 make tidy
+make run-supervisor
 make web-build
 make web-lint
 ```
@@ -142,6 +148,38 @@ make run-worker
 
 Worker tokens control application-level registration and worker rows. They do not replace database credentials: a worker still needs `DATABASE_URL` access. Use per-worker database roles or network policies for a hard security boundary.
 
+### Worker pools and enrollment
+
+A worker pool is the database record of a desired worker: its project, name, concurrency, and active/paused status. Pools are the source of truth for the supervisor and are managed from the project dashboard or API.
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `POST` | `/v1/projects/{projectID}/worker-pools` | Create a pool (`name`, optional `concurrency`, default 4) |
+| `GET` | `/v1/projects/{projectID}/worker-pools` | List pools |
+| `PATCH` | `/v1/projects/{projectID}/worker-pools/{poolID}` | Rename, resize, pause, or resume a pool |
+| `DELETE` | `/v1/projects/{projectID}/worker-pools/{poolID}` | Delete a pool and its tokens |
+| `POST` | `/v1/projects/{projectID}/worker-pools/{poolID}/enrollment-tokens` | Issue a single-use enrollment token |
+| `POST` | `/v1/workers/enroll` | Redeem an enrollment token (bearer auth, no session) |
+
+Enrollment tokens use the `rf_enroll_` prefix, expire after 15 minutes by default, and are consumed on first use. Redeeming one returns a pool-scoped `rf_worker_` token plus the pool configuration. This lets a worker bootstrap without a long-lived env secret:
+
+```sh
+export WORKER_ENROLLMENT_TOKEN=rf_enroll_...
+export WORKER_TOKEN_FILE=.relayforge/worker-token.json
+export RELAYFORGE_API_URL=http://localhost:8080
+make run-worker
+```
+
+The worker exchanges the enrollment token, writes the issued token to `WORKER_TOKEN_FILE` with `0600` permissions, and reuses it on restart. Explicit `WORKER_TOKEN` still takes precedence; a cached token file is next; enrollment is the fallback. To rotate, delete the token file and restart with a fresh enrollment token.
+
+The **supervisor** reads active pools and runs one worker process per pool, restarting workers when configuration changes and stopping them when a pool is paused or deleted:
+
+```sh
+make run-supervisor
+```
+
+It issues an enrollment token per spawn, sets `WORKER_PROJECT_ID`/`WORKER_NAME`/`WORKER_CONCURRENCY` from the pool, and stores per-pool cached tokens under `SUPERVISOR_TOKEN_DIR`. See [docs/processing-engine.md](docs/processing-engine.md) for the full flow.
+
 API keys use the `rf_live_` prefix and are returned only once at creation. Keys are hashed at rest with HMAC-SHA256 using `API_KEY_PEPPER`, and the dashboard shows only a short `key_prefix`. Key creation accepts an optional `expires_in_days` (1–3650); omitted keys never expire. `last_used_at` is updated at most once per minute during authentication.
 
 Set `API_KEY_PEPPER` to a long random value. A development fallback is used when `APP_ENV` is not `production`; production refuses to start without it. Rotating the pepper invalidates existing keys because their stored hashes can no longer be reproduced.
@@ -186,7 +224,7 @@ Set a limit to `0` to disable it. These counters are per API process; running mu
 
 ### Processing engine
 
-The worker requires a project and a matching worker token:
+The worker resolves credentials in this order: explicit `WORKER_TOKEN`, a cached token file at `WORKER_TOKEN_FILE`, then `WORKER_ENROLLMENT_TOKEN` (which enrolls against `RELAYFORGE_API_URL`). If the token belongs to a worker pool, the pool's concurrency and name override the env defaults.
 
 ```sh
 export WORKER_PROJECT_ID=<project-uuid>
@@ -209,10 +247,11 @@ The worker:
 
 The development handlers are `echo`, `noop`, and `sleep`. Register production handlers in `cmd/worker/main.go`.
 
-With Docker Compose, start the worker with the `worker` profile:
+With Docker Compose, start a standalone worker with the `worker` profile, or let the supervisor manage all active pools with the `supervisor` profile:
 
 ```sh
 docker compose --profile worker up -d
+docker compose --profile supervisor up -d
 ```
 
 See [docs/processing-engine.md](docs/processing-engine.md) for configuration and behavior details.

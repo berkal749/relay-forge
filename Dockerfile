@@ -8,11 +8,12 @@ RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
 
-ARG TARGET=api
-RUN CGO_ENABLED=0 go build -o /out/relayforge ./cmd/${TARGET}
+RUN CGO_ENABLED=0 go build -o /out/relayforge-api ./cmd/api \
+    && CGO_ENABLED=0 go build -o /out/relayforge-worker ./cmd/worker \
+    && CGO_ENABLED=0 go build -o /out/relayforge-supervisor ./cmd/supervisor
 
 FROM alpine:3.22
 
-COPY --from=builder /out/relayforge /usr/local/bin/relayforge
+COPY --from=builder /out/ /usr/local/bin/
 
-ENTRYPOINT ["relayforge"]
+ENTRYPOINT ["/usr/local/bin/relayforge-api"]

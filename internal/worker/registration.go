@@ -12,7 +12,7 @@ import (
 	"relayforge/internal/database/db"
 )
 
-func Register(ctx context.Context, queries *db.Queries, projectID, tokenID uuid.UUID, name string) (db.Worker, error) {
+func Register(ctx context.Context, queries *db.Queries, projectID, tokenID uuid.UUID, poolID *uuid.UUID, name string) (db.Worker, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return db.Worker{}, fmt.Errorf("worker name cannot be empty")
@@ -21,6 +21,7 @@ func Register(ctx context.Context, queries *db.Queries, projectID, tokenID uuid.
 	created, err := queries.CreateWorker(ctx, db.CreateWorkerParams{
 		ProjectID:     projectID,
 		WorkerTokenID: &tokenID,
+		WorkerPoolID:  poolID,
 		Name:          name,
 		Status:        "online",
 	})

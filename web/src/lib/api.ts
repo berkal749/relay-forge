@@ -110,6 +110,16 @@ export type WorkerToken = {
   created_at: string
 }
 
+export type WorkerPool = {
+  id: string
+  project_id: string
+  name: string
+  concurrency: number
+  status: "active" | "paused"
+  created_at: string
+  updated_at: string
+}
+
 export type JobStatus =
   | "pending"
   | "scheduled"
@@ -263,6 +273,65 @@ export const api = {
     return request<void>(
       `/v1/projects/${projectId}/worker-tokens/${tokenId}`,
       { method: "DELETE", token },
+    )
+  },
+
+  listWorkerPools(token: string, projectId: string) {
+    return request<{ worker_pools: WorkerPool[] }>(
+      `/v1/projects/${projectId}/worker-pools`,
+      { token },
+    )
+  },
+
+  createWorkerPool(
+    token: string,
+    projectId: string,
+    name: string,
+    concurrency?: number,
+  ) {
+    return request<{ worker_pool: WorkerPool }>(
+      `/v1/projects/${projectId}/worker-pools`,
+      {
+        method: "POST",
+        token,
+        body: { name, concurrency },
+      },
+    )
+  },
+
+  updateWorkerPool(
+    token: string,
+    projectId: string,
+    poolId: string,
+    input: { name?: string; concurrency?: number; status?: "active" | "paused" },
+  ) {
+    return request<{ worker_pool: WorkerPool }>(
+      `/v1/projects/${projectId}/worker-pools/${poolId}`,
+      { method: "PATCH", token, body: input },
+    )
+  },
+
+  deleteWorkerPool(token: string, projectId: string, poolId: string) {
+    return request<void>(
+      `/v1/projects/${projectId}/worker-pools/${poolId}`,
+      { method: "DELETE", token },
+    )
+  },
+
+  createEnrollmentToken(
+    token: string,
+    projectId: string,
+    poolId: string,
+    name?: string,
+    expiresInMinutes?: number,
+  ) {
+    return request<{ enrollment_token: WorkerToken; token: string }>(
+      `/v1/projects/${projectId}/worker-pools/${poolId}/enrollment-tokens`,
+      {
+        method: "POST",
+        token,
+        body: { name, expires_in_minutes: expiresInMinutes },
+      },
     )
   },
 

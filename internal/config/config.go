@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -28,6 +29,10 @@ type Config struct {
 
 	WorkerProjectID         string
 	WorkerToken             string
+	WorkerTokenFile         string
+	WorkerEnrollmentToken   string
+	WorkerEnrollmentTTL     time.Duration
+	APIBaseURL              string
 	WorkerName              string
 	WorkerConcurrency       int
 	WorkerPollInterval      time.Duration
@@ -37,6 +42,10 @@ type Config struct {
 	WorkerCleanupInterval   time.Duration
 	RetryBaseDelay          time.Duration
 	RetryMaxDelay           time.Duration
+
+	SupervisorPollInterval time.Duration
+	SupervisorWorkerBinary string
+	SupervisorTokenDir     string
 }
 
 func Load() (Config, error) {
@@ -137,6 +146,38 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("RETRY_MAX_DELAY must be greater than or equal to RETRY_BASE_DELAY")
 	}
 
+	workerTokenFile := os.Getenv("WORKER_TOKEN_FILE")
+	if workerTokenFile == "" {
+		workerTokenFile = ".relayforge/worker-token.json"
+	}
+
+	apiBaseURL := os.Getenv("RELAYFORGE_API_URL")
+	if apiBaseURL == "" {
+		apiBaseURL = "http://localhost:8080"
+	}
+	apiBaseURL = strings.TrimRight(apiBaseURL, "/")
+
+	workerEnrollmentTTL, err := envDuration("WORKER_ENROLLMENT_TTL", 15*time.Minute)
+	if err != nil {
+		return Config{}, err
+	}
+	if workerEnrollmentTTL < time.Minute || workerEnrollmentTTL > 24*time.Hour {
+		return Config{}, fmt.Errorf("WORKER_ENROLLMENT_TTL must be between 1m and 24h")
+	}
+
+	supervisorPollInterval, err := envDuration("SUPERVISOR_POLL_INTERVAL", 5*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+	supervisorWorkerBinary := os.Getenv("SUPERVISOR_WORKER_BINARY")
+	if supervisorWorkerBinary == "" {
+		supervisorWorkerBinary = "relayforge-worker"
+	}
+	supervisorTokenDir := os.Getenv("SUPERVISOR_TOKEN_DIR")
+	if supervisorTokenDir == "" {
+		supervisorTokenDir = ".relayforge/worker-tokens"
+	}
+
 	return Config{
 		AppEnv:                      appEnv,
 		DatabaseURL:                 databaseURL,
@@ -151,6 +192,10 @@ func Load() (Config, error) {
 
 		WorkerProjectID:         os.Getenv("WORKER_PROJECT_ID"),
 		WorkerToken:             os.Getenv("WORKER_TOKEN"),
+		WorkerTokenFile:         workerTokenFile,
+		WorkerEnrollmentToken:   os.Getenv("WORKER_ENROLLMENT_TOKEN"),
+		WorkerEnrollmentTTL:     workerEnrollmentTTL,
+		APIBaseURL:              apiBaseURL,
 		WorkerName:              workerName,
 		WorkerConcurrency:       workerConcurrency,
 		WorkerPollInterval:      workerPollInterval,
@@ -160,6 +205,10 @@ func Load() (Config, error) {
 		WorkerCleanupInterval:   workerCleanupInterval,
 		RetryBaseDelay:          retryBaseDelay,
 		RetryMaxDelay:           retryMaxDelay,
+
+		SupervisorPollInterval: supervisorPollInterval,
+		SupervisorWorkerBinary: supervisorWorkerBinary,
+		SupervisorTokenDir:     supervisorTokenDir,
 	}, nil
 }
 

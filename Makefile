@@ -10,7 +10,7 @@ MIGRATIONS_DIR ?= migrations
 DATABASE_URL ?= postgres://relayforge:relayforge@localhost:5435/relayforge?sslmode=disable
 MIGRATE_CMD = $(MIGRATE) -path "$(MIGRATIONS_DIR)" -database "$(DATABASE_URL)"
 
-.PHONY: run-api run-worker build test fmt tidy \
+.PHONY: run-api run-worker run-supervisor build build-worker test fmt tidy \
 	migrate-install migrate-up migrate-down migrate-status migrate-create \
 	sqlc-install sqlc-generate \
 	web-install web-dev web-build web-lint
@@ -20,6 +20,12 @@ run-api:
 
 run-worker:
 	go run ./cmd/worker
+
+build-worker:
+	go build -o bin/relayforge-worker ./cmd/worker
+
+run-supervisor: build-worker
+	SUPERVISOR_WORKER_BINARY=./bin/relayforge-worker go run ./cmd/supervisor
 
 build:
 	go build ./...

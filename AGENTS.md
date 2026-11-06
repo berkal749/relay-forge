@@ -12,7 +12,7 @@ RelayForge is a PostgreSQL-backed background job / task queue service with three
 
 Stack: Go 1.26, PostgreSQL 17, pgx/v5, sqlc, golang-migrate, React 19, TypeScript, TanStack Query, pnpm.
 
-> Repo status: history begins with the initial scaffold commit. Inspect `git log` rather than assuming earlier history. The latest schema migration is `000007_worker_tokens`.
+> Repo status: history begins with the initial scaffold commit. Inspect `git log` rather than assuming earlier history. The latest schema migration is `000008_worker_pools`.
 
 ## Prerequisites
 
@@ -27,7 +27,8 @@ Backend (from repo root):
 
 ```sh
 make run-api            # go run ./cmd/api (listens on :8080)
-make run-worker         # requires WORKER_PROJECT_ID and WORKER_TOKEN
+make run-worker         # standalone worker; requires credentials (see below)
+make run-supervisor     # reconciles active worker pools into worker processes
 make build              # go build ./...
 make test               # go test ./...
 make fmt                # gofmt -w .
@@ -85,8 +86,11 @@ cmd/api ──► internal/http/routes ──► internal/http/handlers ──�
 internal/database/db (sqlc-generated) ◄── internal/database (pgxpool)
                            ▲
 cmd/worker ──► internal/workertoken (startup auth)
-          ├──► internal/worker (pool, registration) ──► internal/execution
+          ├──► internal/worker (credentials, pool, registration) ──► internal/execution
           └──► internal/outbox (dispatcher)
+
+cmd/supervisor ──► internal/supervisor ──► worker_pools table
+                                            └── spawns cmd/worker processes
 ```
 
 Key packages:
@@ -98,7 +102,9 @@ Key packages:
 | `internal/database/db` | **Generated** by sqlc. Do not edit by hand; change `sql/queries` then `make sqlc-generate`. |
 | `internal/auth` | Registration, login, opaque session tokens (SHA-256 hashed at rest), bcrypt passwords. |
 | `internal/apikey` | `rf_live_` API keys, HMAC-SHA256 hashed at rest, expiry/last-used, project ownership checks. |
-| `internal/workertoken` | `rf_worker_` worker tokens, HMAC-hashed, authenticated at worker startup. |
+| `internal/workertoken` | `rf_worker_` and single-use `rf_enroll_` tokens, HMAC-hashed, enrollment exchange. |
+| `internal/workerpool` | Worker pool CRUD, validation, ownership, enrollment-token issuance. |
+| `internal/supervisor` | Reconciles active `worker_pools` with worker child processes. |
 | `internal/secret` | Shared HMAC/SHA-256/prefix helpers for bearer credentials. |
 | `internal/project` | Project CRUD and settings; delete = archive (`archived_at`), never hard delete. |
 | `internal/job` | Job submission, validation, status model/transitions, reads. |
@@ -113,7 +119,7 @@ Key packages:
 
 ### Data model (PostgreSQL)
 
-`users` → `projects` (archive via `archived_at`) → `api_keys`, `worker_tokens`, `workers`, `jobs` → `executions`, `outbox_messages`; `sessions` belongs to `users`. `workers.worker_token_id` records which token authenticated each worker.
+`users` → `projects` (archive via `archived_at`) → `api_keys`, `worker_pools`, `worker_tokens`, `workers`, `jobs` → `executions`, `outbox_messages`; `sessions` belongs to `users`. `workers.worker_token_id` and `workers.worker_pool_id` record which token and pool registered each worker. `worker_tokens.kind` is `worker` or `enrollment`; enrollment tokens carry `pool_id`, `consumed_at`, and a short expiry.
 
 Important invariants:
 
@@ -126,9 +132,13 @@ Important invariants:
 - Job submission supports per-project idempotency via the `Idempotency-Key` header. The key and a request fingerprint are stored on `jobs`; replays return the original job, and a mismatched fingerprint is a conflict.
 - Projects carry settings: `default_queue_name`, `default_max_attempts`, `default_priority`, `job_retention_days`, `max_concurrency`, `rate_limit_per_minute`, `default_job_timeout_seconds`. Submission defaults are applied by `job.Service.Submit`; worker limits are read at startup; retention is re-read on each cleanup tick.
 - `PATCH /v1/projects/{id}` is a partial update: omitted fields stay unchanged, and an empty update is rejected.
+- Worker pools are per-project desired config (`name`, `concurrency`, `active`/`paused`). Names are unique per project; concurrency is 1–1000 (default 4).
+- Enrollment tokens are single-use, default to a 15-minute TTL, and are consumed atomically via `ConsumeEnrollmentToken`. Redeeming one issues a `worker` token bound to the same pool.
+- A worker token bound to a paused pool, a revoked/expired token, or an archived project cannot authenticate.
 
 ### Worker processing flow
 
+0. Credentials resolve as `WORKER_TOKEN` → `WORKER_TOKEN_FILE` → `WORKER_ENROLLMENT_TOKEN` (`POST /v1/workers/enroll`, then cache). Pool membership overrides concurrency and name. The token is authenticated before `worker.Register`; the pool must be active.
 1. Outbox dispatcher polls every second, claims pending messages with `FOR UPDATE SKIP LOCKED`, calls `pg_notify('relayforge_jobs', job_id)`, and marks messages processed in the same transaction.
 2. Each pool goroutine calls `execution.Service.Claim`; claimability requires matching project, `pending`/`scheduled`, `scheduled_at <= now()`, `attempts < max_attempts`, and a processed outbox message.
 3. Handler runs under `JOB_TIMEOUT`.
@@ -136,7 +146,8 @@ Important invariants:
 5. Project `max_concurrency` caps the pool, `rate_limit_per_minute` throttles claims in fixed one-minute windows, and `default_job_timeout_seconds` overrides `JOB_TIMEOUT`. These are read at worker startup.
 6. `worker.RunCleanup` periodically purges terminal jobs past `job_retention_days` (re-read each tick; `0` disables).
 7. Shutdown stops claiming, drains up to `WORKER_SHUTDOWN_TIMEOUT`, cancels remaining handlers, records cancelled executions, marks the worker offline.
-8. Note: the `pg_notify` message is currently **not consumed** by `LISTEN`; workers poll. Treat notifications as forward-looking.
+8. The **supervisor** reconciles `worker_pools` every `SUPERVISOR_POLL_INTERVAL`: it issues an enrollment token, spawns one `relayforge-worker` per active pool, restarts on name/concurrency changes, and stops workers when a pool is paused/deleted.
+9. Note: the `pg_notify` message is currently **not consumed** by `LISTEN`; workers poll. Treat notifications as forward-looking.
 
 Built-in handler types: `echo`, `noop`, `sleep` (payload `{"duration_ms": N}`). Register real handlers in `cmd/worker/main.go`:
 
@@ -159,7 +170,8 @@ registry.Register("send_email", sendEmailHandler)
 - Use `slog` for logging; do not add a logging framework.
 - HTTP rate limiting lives in `internal/middleware/ratelimit.go`. Limits are in-memory fixed windows keyed by IP, session user, or API key; they are per process, so multi-instance deployments need a shared store.
 - Secret-bearing responses (login, API key creation, worker token creation) must set `Cache-Control: no-store`. Raw credentials are only returned once, at creation.
-- Worker tokens are managed in `internal/workertoken` and enforced in `cmd/worker` before `worker.Register`. This is app-level auth; workers still use `DATABASE_URL` directly.
+- Worker credentials are managed in `internal/workertoken`; enrollment is resolved in `internal/worker/credentials.go`; `internal/supervisor` reconciles pools. This is app-level auth; workers still use `DATABASE_URL` directly.
+- `cmd/supervisor` spawns the binary at `SUPERVISOR_WORKER_BINARY` (default `relayforge-worker`) and passes pool config through the environment. Cached tokens live under `SUPERVISOR_TOKEN_DIR` with `0600` permissions.
 
 ### Database / sqlc
 
@@ -179,7 +191,7 @@ registry.Register("send_email", sendEmailHandler)
 
 ## Testing
 
-- `make test` / `go test ./...` is the baseline. Unit tests cover auth validation, API key hashing, worker tokens, job defaults/idempotency, backoff/status, project settings, the worker limiter, and HTTP rate limiting.
+- `make test` / `go test ./...` is the baseline. Unit tests cover auth validation, API key hashing, worker tokens/enrollment helpers, worker pools, job defaults/idempotency, backoff/status, project settings, the worker limiter, and HTTP rate limiting.
 - Tests live in `internal/<domain>/*_test.go` and are table-driven where practical.
 - There are still no HTTP handler or database integration tests. Keep new unit tests free of external dependencies; integration tests should be isolated and clearly marked.
 - Run `make web-lint` and `make web-build` after frontend changes.
@@ -199,10 +211,10 @@ Other known gaps:
 - No job cancellation endpoint even though the status model and docs support `cancelled`; `UpdateJobStatus` is unused.
 - No `LISTEN` consumer for `relayforge_jobs`; the worker relies on polling.
 - `outbox_messages` has a `failed` status but no retry/dead-letter handling.
-- Worker is single-project (`WORKER_PROJECT_ID`); no multi-project or queue subscription model.
+- Worker is single-project per process; the supervisor runs one process per active pool. There is no replicas-per-pool field or autoscaling.
 - No per-queue concurrency or job priority feedback beyond SQL ordering.
 - API and worker rate limiting are per process; multi-instance deployments need a shared store.
-- API key and worker token scopes/rotation endpoints are not implemented (expiry, revocation, and last-used tracking are).
+- API key and worker token scopes/rotation endpoints are not implemented (expiry, revocation, last-used tracking, and enrollment-based rotation are).
 - Worker token auth is application-level; it does not restrict direct database access.
 
 ## Before finishing a task

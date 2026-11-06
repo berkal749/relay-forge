@@ -20,6 +20,7 @@ import (
 	"relayforge/internal/job"
 	"relayforge/internal/middleware"
 	"relayforge/internal/project"
+	"relayforge/internal/workerpool"
 	"relayforge/internal/workertoken"
 )
 
@@ -50,6 +51,7 @@ func run() error {
 	projectService := project.NewService(queries)
 	apiKeyService := apikey.NewService(queries, projectService, cfg.APIKeyPepper)
 	workerTokenService := workertoken.NewService(queries, projectService, cfg.WorkerTokenPepper)
+	workerPoolService := workerpool.NewService(queries, projectService, workerTokenService)
 	jobService := job.NewService(pool)
 
 	router := routes.New(routes.Dependencies{
@@ -57,6 +59,8 @@ func run() error {
 		Projects:            handlers.NewProjectHandler(projectService),
 		APIKeys:             handlers.NewAPIKeyHandler(apiKeyService),
 		WorkerTokens:        handlers.NewWorkerTokenHandler(workerTokenService),
+		WorkerPools:         handlers.NewWorkerPoolHandler(workerPoolService),
+		Enrollment:          handlers.NewEnrollmentHandler(workerTokenService),
 		Jobs:                handlers.NewJobHandler(jobService, projectService),
 		Authenticator:       authService,
 		APIKeyAuthenticator: apiKeyService,

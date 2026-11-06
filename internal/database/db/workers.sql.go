@@ -12,14 +12,15 @@ import (
 )
 
 const createWorker = `-- name: CreateWorker :one
-INSERT INTO workers (project_id, worker_token_id, name, status)
-VALUES ($1, $2, $3, $4)
-RETURNING id, project_id, name, status, last_heartbeat_at, created_at, worker_token_id
+INSERT INTO workers (project_id, worker_token_id, worker_pool_id, name, status)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, project_id, name, status, last_heartbeat_at, created_at, worker_token_id, worker_pool_id
 `
 
 type CreateWorkerParams struct {
 	ProjectID     uuid.UUID  `json:"project_id"`
 	WorkerTokenID *uuid.UUID `json:"worker_token_id"`
+	WorkerPoolID  *uuid.UUID `json:"worker_pool_id"`
 	Name          string     `json:"name"`
 	Status        string     `json:"status"`
 }
@@ -28,6 +29,7 @@ func (q *Queries) CreateWorker(ctx context.Context, arg CreateWorkerParams) (Wor
 	row := q.db.QueryRow(ctx, createWorker,
 		arg.ProjectID,
 		arg.WorkerTokenID,
+		arg.WorkerPoolID,
 		arg.Name,
 		arg.Status,
 	)
@@ -40,12 +42,13 @@ func (q *Queries) CreateWorker(ctx context.Context, arg CreateWorkerParams) (Wor
 		&i.LastHeartbeatAt,
 		&i.CreatedAt,
 		&i.WorkerTokenID,
+		&i.WorkerPoolID,
 	)
 	return i, err
 }
 
 const getWorker = `-- name: GetWorker :one
-SELECT id, project_id, name, status, last_heartbeat_at, created_at, worker_token_id FROM workers WHERE id = $1
+SELECT id, project_id, name, status, last_heartbeat_at, created_at, worker_token_id, worker_pool_id FROM workers WHERE id = $1
 `
 
 func (q *Queries) GetWorker(ctx context.Context, id uuid.UUID) (Worker, error) {
@@ -59,12 +62,13 @@ func (q *Queries) GetWorker(ctx context.Context, id uuid.UUID) (Worker, error) {
 		&i.LastHeartbeatAt,
 		&i.CreatedAt,
 		&i.WorkerTokenID,
+		&i.WorkerPoolID,
 	)
 	return i, err
 }
 
 const listWorkersByProject = `-- name: ListWorkersByProject :many
-SELECT id, project_id, name, status, last_heartbeat_at, created_at, worker_token_id FROM workers
+SELECT id, project_id, name, status, last_heartbeat_at, created_at, worker_token_id, worker_pool_id FROM workers
 WHERE project_id = $1
 ORDER BY created_at DESC
 `
@@ -86,6 +90,7 @@ func (q *Queries) ListWorkersByProject(ctx context.Context, projectID uuid.UUID)
 			&i.LastHeartbeatAt,
 			&i.CreatedAt,
 			&i.WorkerTokenID,
+			&i.WorkerPoolID,
 		); err != nil {
 			return nil, err
 		}
@@ -112,7 +117,7 @@ const updateWorkerHeartbeat = `-- name: UpdateWorkerHeartbeat :one
 UPDATE workers
 SET status = 'online', last_heartbeat_at = now()
 WHERE id = $1
-RETURNING id, project_id, name, status, last_heartbeat_at, created_at, worker_token_id
+RETURNING id, project_id, name, status, last_heartbeat_at, created_at, worker_token_id, worker_pool_id
 `
 
 func (q *Queries) UpdateWorkerHeartbeat(ctx context.Context, id uuid.UUID) (Worker, error) {
@@ -126,6 +131,7 @@ func (q *Queries) UpdateWorkerHeartbeat(ctx context.Context, id uuid.UUID) (Work
 		&i.LastHeartbeatAt,
 		&i.CreatedAt,
 		&i.WorkerTokenID,
+		&i.WorkerPoolID,
 	)
 	return i, err
 }

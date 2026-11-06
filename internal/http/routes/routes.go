@@ -13,6 +13,8 @@ type Dependencies struct {
 	Projects            *handlers.ProjectHandler
 	APIKeys             *handlers.APIKeyHandler
 	WorkerTokens        *handlers.WorkerTokenHandler
+	WorkerPools         *handlers.WorkerPoolHandler
+	Enrollment          *handlers.EnrollmentHandler
 	Jobs                *handlers.JobHandler
 	Authenticator       middleware.Authenticator
 	APIKeyAuthenticator middleware.APIKeyAuthenticator
@@ -54,6 +56,14 @@ func New(deps Dependencies) http.Handler {
 	mux.Handle("POST /v1/projects/{projectID}/worker-tokens", requireSession(limitSession(http.HandlerFunc(deps.WorkerTokens.Create))))
 	mux.Handle("GET /v1/projects/{projectID}/worker-tokens", requireSession(limitSession(http.HandlerFunc(deps.WorkerTokens.List))))
 	mux.Handle("DELETE /v1/projects/{projectID}/worker-tokens/{tokenID}", requireSession(limitSession(http.HandlerFunc(deps.WorkerTokens.Revoke))))
+
+	mux.Handle("POST /v1/projects/{projectID}/worker-pools", requireSession(limitSession(http.HandlerFunc(deps.WorkerPools.Create))))
+	mux.Handle("GET /v1/projects/{projectID}/worker-pools", requireSession(limitSession(http.HandlerFunc(deps.WorkerPools.List))))
+	mux.Handle("PATCH /v1/projects/{projectID}/worker-pools/{poolID}", requireSession(limitSession(http.HandlerFunc(deps.WorkerPools.Update))))
+	mux.Handle("DELETE /v1/projects/{projectID}/worker-pools/{poolID}", requireSession(limitSession(http.HandlerFunc(deps.WorkerPools.Delete))))
+	mux.Handle("POST /v1/projects/{projectID}/worker-pools/{poolID}/enrollment-tokens", requireSession(limitSession(http.HandlerFunc(deps.WorkerPools.CreateEnrollmentToken))))
+
+	mux.Handle("POST /v1/workers/enroll", limitAuth(http.HandlerFunc(deps.Enrollment.Enroll)))
 
 	mux.Handle("GET /v1/api-keys/current", requireAPIKey(limitAPIKey(http.HandlerFunc(deps.APIKeys.Current))))
 	mux.Handle("POST /v1/jobs", requireAPIKey(limitSubmitAPIKey(http.HandlerFunc(deps.Jobs.Submit))))
