@@ -150,13 +150,26 @@ Worker tokens control application-level registration and worker rows. They do no
 
 ### Worker pools and enrollment
 
-A worker pool is the database record of a desired worker: its project, name, concurrency, and active/paused status. Pools are the source of truth for the supervisor and are managed from the project dashboard or API.
+A worker pool is the database record of a desired worker: its project, name, concurrency, active/paused status, and processing policy. Pools are the source of truth for the supervisor and are managed from the project dashboard or API.
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `name` | required | Pool and worker display name |
+| `concurrency` | `4` | Concurrent jobs per worker (1–1000) |
+| `queue_names` | `[]` | Queues this pool claims; empty means all queues |
+| `job_timeout_seconds` | `0` | Per-job timeout; `0` uses the project default, then `JOB_TIMEOUT` |
+| `max_attempts` | `0` | Overrides each claimed job's attempt limit; `0` keeps the job's value |
+| `retry_backoff` | `exponential` | `exponential` or `fixed` |
+| `retry_base_delay_seconds` | `0` | Base retry delay; `0` uses `RETRY_BASE_DELAY` |
+| `retry_max_delay_seconds` | `0` | Retry delay ceiling; `0` uses `RETRY_MAX_DELAY` |
+
+Queue selection is enforced in the claim query: a worker only claims jobs whose `queue_name` is in its pool's list. The per-pool retry policy is applied at claim time, so `max_attempts` is written onto the job and retry delays use the pool's backoff settings.
 
 | Method | Endpoint | Description |
 | --- | --- | --- |
-| `POST` | `/v1/projects/{projectID}/worker-pools` | Create a pool (`name`, optional `concurrency`, default 4) |
+| `POST` | `/v1/projects/{projectID}/worker-pools` | Create a pool (`name`, optional policy fields) |
 | `GET` | `/v1/projects/{projectID}/worker-pools` | List pools |
-| `PATCH` | `/v1/projects/{projectID}/worker-pools/{poolID}` | Rename, resize, pause, or resume a pool |
+| `PATCH` | `/v1/projects/{projectID}/worker-pools/{poolID}` | Update name, size, status, queues, timeout, or retry policy |
 | `DELETE` | `/v1/projects/{projectID}/worker-pools/{poolID}` | Delete a pool and its tokens |
 | `POST` | `/v1/projects/{projectID}/worker-pools/{poolID}/enrollment-tokens` | Issue a single-use enrollment token |
 | `POST` | `/v1/workers/enroll` | Redeem an enrollment token (bearer auth, no session) |
@@ -172,7 +185,7 @@ make run-worker
 
 The worker exchanges the enrollment token, writes the issued token to `WORKER_TOKEN_FILE` with `0600` permissions, and reuses it on restart. Explicit `WORKER_TOKEN` still takes precedence; a cached token file is next; enrollment is the fallback. To rotate, delete the token file and restart with a fresh enrollment token.
 
-The **supervisor** reads active pools and runs one worker process per pool, restarting workers when configuration changes and stopping them when a pool is paused or deleted:
+The **supervisor** reads active pools and runs one worker process per pool, restarting workers when policy or configuration changes and stopping them when a pool is paused or deleted:
 
 ```sh
 make run-supervisor

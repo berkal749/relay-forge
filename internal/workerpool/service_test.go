@@ -67,3 +67,66 @@ func TestUpdateInputEmpty(t *testing.T) {
 		t.Fatal("UpdateInput with a field should not report empty")
 	}
 }
+
+func TestNormalizeQueueNames(t *testing.T) {
+	got, err := normalizeQueueNames([]string{" emails ", "default", "emails", ""})
+	if err == nil {
+		t.Fatal("normalizeQueueNames() expected error for an empty queue")
+	}
+
+	got, err = normalizeQueueNames([]string{" emails ", "default", "emails"})
+	if err != nil {
+		t.Fatalf("normalizeQueueNames() error = %v", err)
+	}
+	if len(got) != 2 || got[0] != "emails" || got[1] != "default" {
+		t.Fatalf("normalizeQueueNames() = %v, want [emails default]", got)
+	}
+
+	if _, err := normalizeQueueNames(make([]string, 51)); err == nil {
+		t.Fatal("normalizeQueueNames() expected error for too many queues")
+	}
+}
+
+func TestValidatePolicy(t *testing.T) {
+	tests := []struct {
+		name     string
+		backoff  string
+		base     int32
+		maxDelay int32
+		wantErr  bool
+	}{
+		{name: "defaults", backoff: BackoffExponential},
+		{name: "fixed", backoff: BackoffFixed, base: 5, maxDelay: 60},
+		{name: "invalid backoff", backoff: "linear", wantErr: true},
+		{name: "max below base", backoff: BackoffFixed, base: 60, maxDelay: 5, wantErr: true},
+		{name: "negative base", backoff: BackoffFixed, base: -1, wantErr: true},
+		{name: "timeout too high", backoff: BackoffExponential, wantErr: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			timeout := int32(0)
+			if test.name == "timeout too high" {
+				timeout = 86401
+			}
+			_, _, err := validatePolicy(nil, timeout, 0, test.backoff, test.base, test.maxDelay)
+			if test.wantErr && err == nil {
+				t.Fatal("validatePolicy() expected error")
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("validatePolicy() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestUpdateInputEmptyWithPolicyFields(t *testing.T) {
+	queues := []string{"default"}
+	timeout := int32(30)
+	if (UpdateInput{QueueNames: &queues}).Empty() {
+		t.Fatal("UpdateInput with queues should not report empty")
+	}
+	if (UpdateInput{JobTimeoutSeconds: &timeout}).Empty() {
+		t.Fatal("UpdateInput with timeout should not report empty")
+	}
+}

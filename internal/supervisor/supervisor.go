@@ -226,7 +226,16 @@ func (s *Supervisor) stopAll() {
 }
 
 func specFor(pool db.WorkerPool) string {
-	return pool.Name + "|" + strconv.Itoa(int(pool.Concurrency))
+	return strings.Join([]string{
+		pool.Name,
+		strconv.Itoa(int(pool.Concurrency)),
+		strings.Join(pool.QueueNames, ","),
+		strconv.Itoa(int(pool.JobTimeoutSeconds)),
+		strconv.Itoa(int(pool.MaxAttempts)),
+		pool.RetryBackoff,
+		strconv.Itoa(int(pool.RetryBaseDelaySeconds)),
+		strconv.Itoa(int(pool.RetryMaxDelaySeconds)),
+	}, "|")
 }
 
 func mergeEnv(base []string, overrides map[string]string) []string {

@@ -21,14 +21,26 @@ type WorkerPoolHandler struct {
 }
 
 type workerPoolRequest struct {
-	Name        string `json:"name"`
-	Concurrency *int32 `json:"concurrency"`
+	Name                  string   `json:"name"`
+	Concurrency           *int32   `json:"concurrency"`
+	QueueNames            []string `json:"queue_names"`
+	JobTimeoutSeconds     int32    `json:"job_timeout_seconds"`
+	MaxAttempts           int32    `json:"max_attempts"`
+	RetryBackoff          string   `json:"retry_backoff"`
+	RetryBaseDelaySeconds int32    `json:"retry_base_delay_seconds"`
+	RetryMaxDelaySeconds  int32    `json:"retry_max_delay_seconds"`
 }
 
 type workerPoolUpdateRequest struct {
-	Name        *string `json:"name"`
-	Concurrency *int32  `json:"concurrency"`
-	Status      *string `json:"status"`
+	Name                  *string   `json:"name"`
+	Concurrency           *int32    `json:"concurrency"`
+	Status                *string   `json:"status"`
+	QueueNames            *[]string `json:"queue_names"`
+	JobTimeoutSeconds     *int32    `json:"job_timeout_seconds"`
+	MaxAttempts           *int32    `json:"max_attempts"`
+	RetryBackoff          *string   `json:"retry_backoff"`
+	RetryBaseDelaySeconds *int32    `json:"retry_base_delay_seconds"`
+	RetryMaxDelaySeconds  *int32    `json:"retry_max_delay_seconds"`
 }
 
 type enrollmentTokenRequest struct {
@@ -37,13 +49,19 @@ type enrollmentTokenRequest struct {
 }
 
 type workerPoolResponse struct {
-	ID          uuid.UUID `json:"id"`
-	ProjectID   uuid.UUID `json:"project_id"`
-	Name        string    `json:"name"`
-	Concurrency int32     `json:"concurrency"`
-	Status      string    `json:"status"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID                    uuid.UUID `json:"id"`
+	ProjectID             uuid.UUID `json:"project_id"`
+	Name                  string    `json:"name"`
+	Concurrency           int32     `json:"concurrency"`
+	Status                string    `json:"status"`
+	QueueNames            []string  `json:"queue_names"`
+	JobTimeoutSeconds     int32     `json:"job_timeout_seconds"`
+	MaxAttempts           int32     `json:"max_attempts"`
+	RetryBackoff          string    `json:"retry_backoff"`
+	RetryBaseDelaySeconds int32     `json:"retry_base_delay_seconds"`
+	RetryMaxDelaySeconds  int32     `json:"retry_max_delay_seconds"`
+	CreatedAt             time.Time `json:"created_at"`
+	UpdatedAt             time.Time `json:"updated_at"`
 }
 
 func NewWorkerPoolHandler(service *workerpool.Service) *WorkerPoolHandler {
@@ -74,7 +92,16 @@ func (h *WorkerPoolHandler) Create(w http.ResponseWriter, r *http.Request) {
 		concurrency = *request.Concurrency
 	}
 
-	pool, err := h.service.Create(r.Context(), session.User.ID, projectID, request.Name, concurrency)
+	pool, err := h.service.Create(r.Context(), session.User.ID, projectID, workerpool.CreateInput{
+		Name:                  request.Name,
+		Concurrency:           concurrency,
+		QueueNames:            request.QueueNames,
+		JobTimeoutSeconds:     request.JobTimeoutSeconds,
+		MaxAttempts:           request.MaxAttempts,
+		RetryBackoff:          request.RetryBackoff,
+		RetryBaseDelaySeconds: request.RetryBaseDelaySeconds,
+		RetryMaxDelaySeconds:  request.RetryMaxDelaySeconds,
+	})
 	if err != nil {
 		writeWorkerPoolError(w, "create worker pool", err)
 		return
@@ -135,9 +162,15 @@ func (h *WorkerPoolHandler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pool, err := h.service.Update(r.Context(), session.User.ID, projectID, poolID, workerpool.UpdateInput{
-		Name:        request.Name,
-		Concurrency: request.Concurrency,
-		Status:      request.Status,
+		Name:                  request.Name,
+		Concurrency:           request.Concurrency,
+		Status:                request.Status,
+		QueueNames:            request.QueueNames,
+		JobTimeoutSeconds:     request.JobTimeoutSeconds,
+		MaxAttempts:           request.MaxAttempts,
+		RetryBackoff:          request.RetryBackoff,
+		RetryBaseDelaySeconds: request.RetryBaseDelaySeconds,
+		RetryMaxDelaySeconds:  request.RetryMaxDelaySeconds,
 	})
 	if err != nil {
 		writeWorkerPoolError(w, "update worker pool", err)
@@ -220,14 +253,25 @@ func (h *WorkerPoolHandler) CreateEnrollmentToken(w http.ResponseWriter, r *http
 }
 
 func toWorkerPoolResponse(pool db.WorkerPool) workerPoolResponse {
+	queueNames := pool.QueueNames
+	if queueNames == nil {
+		queueNames = []string{}
+	}
+
 	return workerPoolResponse{
-		ID:          pool.ID,
-		ProjectID:   pool.ProjectID,
-		Name:        pool.Name,
-		Concurrency: pool.Concurrency,
-		Status:      pool.Status,
-		CreatedAt:   pool.CreatedAt,
-		UpdatedAt:   pool.UpdatedAt,
+		ID:                    pool.ID,
+		ProjectID:             pool.ProjectID,
+		Name:                  pool.Name,
+		Concurrency:           pool.Concurrency,
+		Status:                pool.Status,
+		QueueNames:            queueNames,
+		JobTimeoutSeconds:     pool.JobTimeoutSeconds,
+		MaxAttempts:           pool.MaxAttempts,
+		RetryBackoff:          pool.RetryBackoff,
+		RetryBaseDelaySeconds: pool.RetryBaseDelaySeconds,
+		RetryMaxDelaySeconds:  pool.RetryMaxDelaySeconds,
+		CreatedAt:             pool.CreatedAt,
+		UpdatedAt:             pool.UpdatedAt,
 	}
 }
 
@@ -241,6 +285,16 @@ func writeWorkerPoolError(w http.ResponseWriter, operation string, err error) {
 		httpx.WriteError(w, http.StatusBadRequest, "worker pool name must be between 1 and 100 characters")
 	case errors.Is(err, workerpool.ErrInvalidConcurrency):
 		httpx.WriteError(w, http.StatusBadRequest, "worker pool concurrency must be between 1 and 1000")
+	case errors.Is(err, workerpool.ErrInvalidQueueNames):
+		httpx.WriteError(w, http.StatusBadRequest, "worker pool queues must be 1-100 characters each and contain at most 50 queues")
+	case errors.Is(err, workerpool.ErrInvalidJobTimeout):
+		httpx.WriteError(w, http.StatusBadRequest, "worker pool job timeout must be between 0 and 86400 seconds")
+	case errors.Is(err, workerpool.ErrInvalidMaxAttempts):
+		httpx.WriteError(w, http.StatusBadRequest, "worker pool max attempts must be between 0 and 100")
+	case errors.Is(err, workerpool.ErrInvalidRetryBackoff):
+		httpx.WriteError(w, http.StatusBadRequest, "worker pool retry backoff must be fixed or exponential")
+	case errors.Is(err, workerpool.ErrInvalidRetryDelay):
+		httpx.WriteError(w, http.StatusBadRequest, "worker pool retry delays must be between 0 and 86400 seconds, with max >= base")
 	case errors.Is(err, workerpool.ErrInvalidStatus):
 		httpx.WriteError(w, http.StatusBadRequest, "worker pool status must be active or paused")
 	case errors.Is(err, workerpool.ErrEmptyUpdate):

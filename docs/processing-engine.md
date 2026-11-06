@@ -24,7 +24,16 @@ This is application-level authorization. Workers still connect directly to Postg
 
 ## Worker pools and supervisor
 
-`worker_pools` stores the desired worker configuration per project: name, concurrency, and `active`/`paused` status. Workers are not manually indexed against pools; the supervisor is the reconciler.
+`worker_pools` stores the desired worker configuration per project: name, concurrency, `active`/`paused` status, queue selection, job timeout, and retry policy. Workers are not manually indexed against pools; the supervisor is the reconciler.
+
+| Field | Meaning |
+| --- | --- |
+| `queue_names` | Queues this pool may claim; empty means all queues |
+| `job_timeout_seconds` | Per-job timeout; `0` falls back to project default then `JOB_TIMEOUT` |
+| `max_attempts` | Claim-time override of the job's attempt limit; `0` keeps the job value |
+| `retry_backoff` | `fixed` or `exponential` |
+| `retry_base_delay_seconds` | Base delay; `0` falls back to `RETRY_BASE_DELAY` |
+| `retry_max_delay_seconds` | Delay ceiling; `0` falls back to `RETRY_MAX_DELAY` |
 
 ```text
 worker_pools (active)
@@ -45,7 +54,7 @@ issue rf_enroll_ token --> spawn relayforge-worker
 The supervisor:
 
 - Starts one worker process per active pool and passes `WORKER_PROJECT_ID`, `WORKER_NAME`, and `WORKER_CONCURRENCY` from the pool row.
-- Restarts a worker when the pool name or concurrency changes.
+- Restarts a worker when the pool name, concurrency, queues, timeout, or retry policy changes.
 - Stops the worker when the pool is paused or deleted.
 - Reissues an enrollment token on every spawn; cached tokens are reused when still valid.
 - Shuts down children with `SIGTERM` and waits up to 60 seconds before killing them.
@@ -89,8 +98,11 @@ A job is claimable when:
 - Its project matches the worker's project
 - Its status is `pending` or `scheduled`
 - `scheduled_at <= now()`
-- `attempts < max_attempts`
+- `attempts <` the pool's `max_attempts` override when set, otherwise the job's `max_attempts`
+- Its `queue_name` is in the pool's `queue_names` (an empty list means all queues)
 - Its outbox message has been processed
+
+The pool's job timeout controls the handler deadline. On failure, the pool's `retry_backoff` and delay settings decide when the next attempt is scheduled; the claim updates `jobs.max_attempts` to the pool override so the job record reflects the effective policy.
 
 ## Project limits
 
@@ -98,7 +110,7 @@ The worker reads these project settings at startup:
 
 - `max_concurrency` caps `WORKER_CONCURRENCY` when greater than zero.
 - `rate_limit_per_minute` limits how many job claims may start in each one-minute window. `0` is unlimited.
-- `default_job_timeout_seconds` overrides `JOB_TIMEOUT` for this project when greater than zero.
+- `default_job_timeout_seconds` overrides `JOB_TIMEOUT` for this project when greater than zero, unless the worker pool sets its own `job_timeout_seconds`.
 
 Restart the worker after changing these settings. Job submission defaults (`default_queue_name`, `default_priority`, `default_max_attempts`) are applied by the API and need no restart.
 

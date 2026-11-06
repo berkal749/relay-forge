@@ -13,7 +13,7 @@ RelayForge is a PostgreSQL-backed background job / task queue service with four 
 
 Stack: Go 1.26, PostgreSQL 17, pgx/v5, sqlc, golang-migrate, React 19, TypeScript, TanStack Query, pnpm.
 
-> Repo status: history begins with the initial scaffold commit. Inspect `git log` rather than assuming earlier history. The latest schema migration is `000008_worker_pools`.
+> Repo status: history begins with the initial scaffold commit. Inspect `git log` rather than assuming earlier history. The latest schema migration is `000009_worker_pool_policies`.
 
 ## Prerequisites
 
@@ -147,21 +147,22 @@ Important invariants:
 - Job submission supports per-project idempotency via the `Idempotency-Key` header. The key and a request fingerprint are stored on `jobs`; replays return the original job, and a mismatched fingerprint is a conflict.
 - Projects carry settings: `default_queue_name`, `default_max_attempts`, `default_priority`, `job_retention_days`, `max_concurrency`, `rate_limit_per_minute`, `default_job_timeout_seconds`. Submission defaults are applied by `job.Service.Submit`; worker limits are read at startup; retention is re-read on each cleanup tick.
 - `PATCH /v1/projects/{id}` is a partial update: omitted fields stay unchanged, and an empty update is rejected.
-- Worker pools are per-project desired config (`name`, `concurrency`, `active`/`paused`). Names are unique per project; concurrency is 1–1000 (default 4).
+- Worker pools are per-project desired config (`name`, `concurrency`, `active`/`paused`, `queue_names`, `job_timeout_seconds`, `max_attempts`, `retry_backoff`, retry delays). Names are unique per project; concurrency is 1–1000 (default 4). Empty `queue_names` means all queues.
+- Claiming filters on the pool's queue list and applies the pool's `max_attempts` override to the job in the same transaction. Pool retry policy controls the backoff when an attempt fails.
 - Enrollment tokens are single-use, default to a 15-minute TTL, and are consumed atomically via `ConsumeEnrollmentToken`. Redeeming one issues a `worker` token bound to the same pool.
 - A worker token bound to a paused pool, a revoked/expired token, or an archived project cannot authenticate.
 
 ### Worker processing flow
 
-0. Credentials resolve as `WORKER_TOKEN` → `WORKER_TOKEN_FILE` → `WORKER_ENROLLMENT_TOKEN` (`POST /v1/workers/enroll`, then cache). Pool membership overrides concurrency and name. The token is authenticated before `worker.Register`; the pool must be active.
+0. Credentials resolve as `WORKER_TOKEN` → `WORKER_TOKEN_FILE` → `WORKER_ENROLLMENT_TOKEN` (`POST /v1/workers/enroll`, then cache). Pool membership overrides concurrency, name, queues, job timeout, and retry policy. The token is authenticated before `worker.Register`; the pool must be active.
 1. Outbox dispatcher polls every second, claims pending messages with `FOR UPDATE SKIP LOCKED`, calls `pg_notify('relayforge_jobs', job_id)`, and marks messages processed in the same transaction.
-2. Each pool goroutine calls `execution.Service.Claim`; claimability requires matching project, `pending`/`scheduled`, `scheduled_at <= now()`, `attempts < max_attempts`, and a processed outbox message.
-3. Handler runs under `JOB_TIMEOUT`.
-4. Failure retries with exponential backoff `RETRY_BASE_DELAY * 2^(attempt-1)` capped at `RETRY_MAX_DELAY`; exhausted attempts become terminal `failed`.
-5. Project `max_concurrency` caps the pool, `rate_limit_per_minute` throttles claims in fixed one-minute windows, and `default_job_timeout_seconds` overrides `JOB_TIMEOUT`. These are read at worker startup.
+2. Each pool goroutine calls `execution.Service.Claim`; claimability requires matching project, `pending`/`scheduled`, `scheduled_at <= now()`, an attempt below the pool override (or the job's `max_attempts`), a queue in the pool's `queue_names`, and a processed outbox message. The claim writes the pool's `max_attempts` override onto the job.
+3. Handler runs under the pool's `job_timeout_seconds`, then the project default, then `JOB_TIMEOUT`.
+4. Failure retries use the pool's `retry_backoff` (fixed or exponential) with its base/max delays (falling back to `RETRY_BASE_DELAY`/`RETRY_MAX_DELAY`); exhausted attempts become terminal `failed`.
+5. Project `max_concurrency` caps the pool, `rate_limit_per_minute` throttles claims in fixed one-minute windows, and `default_job_timeout_seconds` is the project-level timeout fallback. These are read at worker startup.
 6. `worker.RunCleanup` periodically purges terminal jobs past `job_retention_days` (re-read each tick; `0` disables).
 7. Shutdown stops claiming, drains up to `WORKER_SHUTDOWN_TIMEOUT`, cancels remaining handlers, records cancelled executions, marks the worker offline.
-8. The **supervisor** reconciles `worker_pools` every `SUPERVISOR_POLL_INTERVAL`: it issues an enrollment token, spawns one `relayforge-worker` per active pool, restarts on name/concurrency changes, and stops workers when a pool is paused/deleted.
+8. The **supervisor** reconciles `worker_pools` every `SUPERVISOR_POLL_INTERVAL`: it issues an enrollment token, spawns one `relayforge-worker` per active pool, restarts on name/concurrency/queue/timeout/retry changes, and stops workers when a pool is paused/deleted.
 9. Note: the `pg_notify` message is currently **not consumed** by `LISTEN`; workers poll. Treat notifications as forward-looking.
 
 Built-in handler types: `echo`, `noop`, `sleep` (payload `{"duration_ms": N}`). Register real handlers in `cmd/worker/main.go`:

@@ -12,7 +12,7 @@ import (
 
 type Querier interface {
 	ArchiveProject(ctx context.Context, arg ArchiveProjectParams) (Project, error)
-	ClaimJob(ctx context.Context, projectID uuid.UUID) (Job, error)
+	ClaimJob(ctx context.Context, arg ClaimJobParams) (Job, error)
 	ClaimOutboxMessages(ctx context.Context, limit int32) ([]OutboxMessage, error)
 	ConsumeEnrollmentToken(ctx context.Context, id uuid.UUID) (WorkerToken, error)
 	CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (ApiKey, error)

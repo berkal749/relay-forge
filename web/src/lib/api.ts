@@ -116,8 +116,26 @@ export type WorkerPool = {
   name: string
   concurrency: number
   status: "active" | "paused"
+  queue_names: string[]
+  job_timeout_seconds: number
+  max_attempts: number
+  retry_backoff: "fixed" | "exponential"
+  retry_base_delay_seconds: number
+  retry_max_delay_seconds: number
   created_at: string
   updated_at: string
+}
+
+export type WorkerPoolInput = {
+  name?: string
+  concurrency?: number
+  status?: "active" | "paused"
+  queue_names?: string[]
+  job_timeout_seconds?: number
+  max_attempts?: number
+  retry_backoff?: "fixed" | "exponential"
+  retry_base_delay_seconds?: number
+  retry_max_delay_seconds?: number
 }
 
 export type JobStatus =
@@ -286,15 +304,14 @@ export const api = {
   createWorkerPool(
     token: string,
     projectId: string,
-    name: string,
-    concurrency?: number,
+    input: WorkerPoolInput & { name: string },
   ) {
     return request<{ worker_pool: WorkerPool }>(
       `/v1/projects/${projectId}/worker-pools`,
       {
         method: "POST",
         token,
-        body: { name, concurrency },
+        body: input,
       },
     )
   },
@@ -303,7 +320,7 @@ export const api = {
     token: string,
     projectId: string,
     poolId: string,
-    input: { name?: string; concurrency?: number; status?: "active" | "paused" },
+    input: WorkerPoolInput,
   ) {
     return request<{ worker_pool: WorkerPool }>(
       `/v1/projects/${projectId}/worker-pools/${poolId}`,

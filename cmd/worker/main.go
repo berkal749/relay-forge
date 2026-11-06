@@ -65,9 +65,35 @@ func run() error {
 	projectID := credentials.ProjectID
 	workerName := cfg.WorkerName
 	concurrency := cfg.WorkerConcurrency
+	jobTimeout := cfg.WorkerJobTimeout
+	retryPolicy := execution.RetryPolicy{
+		Backoff: execution.BackoffExponential,
+		Base:    cfg.RetryBaseDelay,
+		Max:     cfg.RetryMaxDelay,
+	}
+	var queueNames []string
+	var maxAttemptsOverride int32
 	if credentials.Pool != nil {
-		workerName = credentials.Pool.Name
-		concurrency = int(credentials.Pool.Concurrency)
+		pool := credentials.Pool
+		workerName = pool.Name
+		concurrency = int(pool.Concurrency)
+		queueNames = pool.QueueNames
+		maxAttemptsOverride = pool.MaxAttempts
+		if pool.JobTimeoutSeconds > 0 {
+			jobTimeout = time.Duration(pool.JobTimeoutSeconds) * time.Second
+		}
+		if pool.RetryBackoff != "" {
+			retryPolicy.Backoff = pool.RetryBackoff
+		}
+		if pool.RetryBaseDelaySeconds > 0 {
+			retryPolicy.Base = time.Duration(pool.RetryBaseDelaySeconds) * time.Second
+		}
+		if pool.RetryMaxDelaySeconds > 0 {
+			retryPolicy.Max = time.Duration(pool.RetryMaxDelaySeconds) * time.Second
+		}
+		if retryPolicy.Max < retryPolicy.Base {
+			retryPolicy.Max = retryPolicy.Base
+		}
 	}
 
 	workerRecord, err := worker.Register(registerCtx, queries, projectID, credentials.Token.ID, credentials.Token.PoolID, workerName)
@@ -84,8 +110,7 @@ func run() error {
 	if projectRecord.MaxConcurrency > 0 && int(projectRecord.MaxConcurrency) < concurrency {
 		concurrency = int(projectRecord.MaxConcurrency)
 	}
-	jobTimeout := cfg.WorkerJobTimeout
-	if projectRecord.DefaultJobTimeoutSeconds > 0 {
+	if projectRecord.DefaultJobTimeoutSeconds > 0 && (credentials.Pool == nil || credentials.Pool.JobTimeoutSeconds == 0) {
 		jobTimeout = time.Duration(projectRecord.DefaultJobTimeoutSeconds) * time.Second
 	}
 
@@ -111,7 +136,7 @@ func run() error {
 	registry.Register("noop", execution.Noop)
 	registry.Register("sleep", execution.Sleep)
 
-	executionService := execution.NewService(pool, cfg.RetryBaseDelay, cfg.RetryMaxDelay)
+	executionService := execution.NewService(pool, retryPolicy, queueNames, maxAttemptsOverride)
 	poolRunner := worker.NewPool(
 		executionService,
 		registry,
@@ -132,6 +157,11 @@ func run() error {
 		"concurrency", concurrency,
 		"job_timeout", jobTimeout,
 		"rate_limit_per_minute", projectRecord.RateLimitPerMinute,
+		"queue_names", queueNames,
+		"max_attempts_override", maxAttemptsOverride,
+		"retry_backoff", retryPolicy.Backoff,
+		"retry_base_delay", retryPolicy.Base,
+		"retry_max_delay", retryPolicy.Max,
 	)
 
 	runErr := poolRunner.Run(signalCtx)

@@ -25,8 +25,18 @@ func TestMergeEnv(t *testing.T) {
 }
 
 func TestSpecFor(t *testing.T) {
-	pool := db.WorkerPool{Name: "general", Concurrency: 4}
-	if spec := specFor(pool); spec != "general|4" {
-		t.Fatalf("specFor() = %q, want %q", spec, "general|4")
+	pool := db.WorkerPool{
+		Name:                  "general",
+		Concurrency:           4,
+		QueueNames:            []string{"default", "emails"},
+		JobTimeoutSeconds:     30,
+		MaxAttempts:           5,
+		RetryBackoff:          "fixed",
+		RetryBaseDelaySeconds: 10,
+		RetryMaxDelaySeconds:  60,
+	}
+	want := "general|4|default,emails|30|5|fixed|10|60"
+	if spec := specFor(pool); spec != want {
+		t.Fatalf("specFor() = %q, want %q", spec, want)
 	}
 }

@@ -16,10 +16,18 @@ const claimJob = `-- name: ClaimJob :one
 WITH candidate AS (
     SELECT jobs.id
     FROM jobs
-    WHERE jobs.project_id = $1
+    WHERE jobs.project_id = $2
       AND jobs.status IN ('pending', 'scheduled')
       AND jobs.scheduled_at <= now()
-      AND jobs.attempts < jobs.max_attempts
+      AND jobs.attempts < CASE
+          WHEN $1::int > 0
+          THEN $1::int
+          ELSE jobs.max_attempts
+      END
+      AND (
+          cardinality($3::text[]) = 0
+          OR jobs.queue_name = ANY($3::text[])
+      )
       AND EXISTS (
           SELECT 1
           FROM outbox_messages
@@ -31,14 +39,26 @@ WITH candidate AS (
     FOR UPDATE SKIP LOCKED
 )
 UPDATE jobs
-SET status = 'running', attempts = attempts + 1
+SET status = 'running',
+    attempts = attempts + 1,
+    max_attempts = CASE
+        WHEN $1::int > 0
+        THEN $1::int
+        ELSE jobs.max_attempts
+    END
 FROM candidate
 WHERE jobs.id = candidate.id
 RETURNING jobs.id, jobs.project_id, jobs.queue_name, jobs.job_type, jobs.payload, jobs.status, jobs.priority, jobs.attempts, jobs.max_attempts, jobs.scheduled_at, jobs.created_at, jobs.updated_at, jobs.idempotency_key, jobs.idempotency_hash
 `
 
-func (q *Queries) ClaimJob(ctx context.Context, projectID uuid.UUID) (Job, error) {
-	row := q.db.QueryRow(ctx, claimJob, projectID)
+type ClaimJobParams struct {
+	MaxAttemptsOverride int32     `json:"max_attempts_override"`
+	ProjectID           uuid.UUID `json:"project_id"`
+	QueueNames          []string  `json:"queue_names"`
+}
+
+func (q *Queries) ClaimJob(ctx context.Context, arg ClaimJobParams) (Job, error) {
+	row := q.db.QueryRow(ctx, claimJob, arg.MaxAttemptsOverride, arg.ProjectID, arg.QueueNames)
 	var i Job
 	err := row.Scan(
 		&i.ID,

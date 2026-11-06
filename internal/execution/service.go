@@ -19,9 +19,10 @@ const maxErrorMessageLength = 4000
 var ErrNoJobs = errors.New("no jobs available")
 
 type Service struct {
-	pool      *pgxpool.Pool
-	retryBase time.Duration
-	retryMax  time.Duration
+	pool        *pgxpool.Pool
+	retryPolicy RetryPolicy
+	queueNames  []string
+	maxAttempts int32
 }
 
 type Claim struct {
@@ -35,11 +36,15 @@ type FailureOutcome struct {
 	JobStatus string
 }
 
-func NewService(pool *pgxpool.Pool, retryBase, retryMax time.Duration) *Service {
+func NewService(pool *pgxpool.Pool, retryPolicy RetryPolicy, queueNames []string, maxAttempts int32) *Service {
+	if retryPolicy.Backoff == "" {
+		retryPolicy.Backoff = BackoffExponential
+	}
 	return &Service{
-		pool:      pool,
-		retryBase: retryBase,
-		retryMax:  retryMax,
+		pool:        pool,
+		retryPolicy: retryPolicy,
+		queueNames:  queueNames,
+		maxAttempts: maxAttempts,
 	}
 }
 
@@ -52,7 +57,11 @@ func (s *Service) Claim(ctx context.Context, projectID, workerID uuid.UUID) (Cla
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	queries := db.New(tx)
-	job, err := queries.ClaimJob(ctx, projectID)
+	job, err := queries.ClaimJob(ctx, db.ClaimJobParams{
+		ProjectID:           projectID,
+		QueueNames:          s.queueNames,
+		MaxAttemptsOverride: s.maxAttempts,
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Claim{}, ErrNoJobs
 	}
@@ -130,7 +139,7 @@ func (s *Service) Fail(ctx context.Context, claim Claim, cause error, cancelled 
 	var retryAt time.Time
 	jobStatus := "failed"
 	if retry {
-		retryAt = time.Now().Add(RetryDelay(claim.Job.Attempts, s.retryBase, s.retryMax))
+		retryAt = time.Now().Add(s.retryPolicy.Delay(claim.Job.Attempts))
 		jobStatus = "scheduled"
 	}
 

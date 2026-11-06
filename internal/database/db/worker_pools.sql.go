@@ -12,16 +12,33 @@ import (
 )
 
 const createWorkerPool = `-- name: CreateWorkerPool :one
-INSERT INTO worker_pools (project_id, name, concurrency, status)
-VALUES ($1, $2, $3, $4)
-RETURNING id, project_id, name, concurrency, status, created_at, updated_at
+INSERT INTO worker_pools (
+    project_id,
+    name,
+    concurrency,
+    status,
+    queue_names,
+    job_timeout_seconds,
+    max_attempts,
+    retry_backoff,
+    retry_base_delay_seconds,
+    retry_max_delay_seconds
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+RETURNING id, project_id, name, concurrency, status, created_at, updated_at, queue_names, job_timeout_seconds, max_attempts, retry_backoff, retry_base_delay_seconds, retry_max_delay_seconds
 `
 
 type CreateWorkerPoolParams struct {
-	ProjectID   uuid.UUID `json:"project_id"`
-	Name        string    `json:"name"`
-	Concurrency int32     `json:"concurrency"`
-	Status      string    `json:"status"`
+	ProjectID             uuid.UUID `json:"project_id"`
+	Name                  string    `json:"name"`
+	Concurrency           int32     `json:"concurrency"`
+	Status                string    `json:"status"`
+	QueueNames            []string  `json:"queue_names"`
+	JobTimeoutSeconds     int32     `json:"job_timeout_seconds"`
+	MaxAttempts           int32     `json:"max_attempts"`
+	RetryBackoff          string    `json:"retry_backoff"`
+	RetryBaseDelaySeconds int32     `json:"retry_base_delay_seconds"`
+	RetryMaxDelaySeconds  int32     `json:"retry_max_delay_seconds"`
 }
 
 func (q *Queries) CreateWorkerPool(ctx context.Context, arg CreateWorkerPoolParams) (WorkerPool, error) {
@@ -30,6 +47,12 @@ func (q *Queries) CreateWorkerPool(ctx context.Context, arg CreateWorkerPoolPara
 		arg.Name,
 		arg.Concurrency,
 		arg.Status,
+		arg.QueueNames,
+		arg.JobTimeoutSeconds,
+		arg.MaxAttempts,
+		arg.RetryBackoff,
+		arg.RetryBaseDelaySeconds,
+		arg.RetryMaxDelaySeconds,
 	)
 	var i WorkerPool
 	err := row.Scan(
@@ -40,6 +63,12 @@ func (q *Queries) CreateWorkerPool(ctx context.Context, arg CreateWorkerPoolPara
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.QueueNames,
+		&i.JobTimeoutSeconds,
+		&i.MaxAttempts,
+		&i.RetryBackoff,
+		&i.RetryBaseDelaySeconds,
+		&i.RetryMaxDelaySeconds,
 	)
 	return i, err
 }
@@ -63,7 +92,7 @@ func (q *Queries) DeleteWorkerPool(ctx context.Context, arg DeleteWorkerPoolPara
 }
 
 const getWorkerPool = `-- name: GetWorkerPool :one
-SELECT id, project_id, name, concurrency, status, created_at, updated_at FROM worker_pools
+SELECT id, project_id, name, concurrency, status, created_at, updated_at, queue_names, job_timeout_seconds, max_attempts, retry_backoff, retry_base_delay_seconds, retry_max_delay_seconds FROM worker_pools
 WHERE id = $1 AND project_id = $2
 `
 
@@ -83,12 +112,18 @@ func (q *Queries) GetWorkerPool(ctx context.Context, arg GetWorkerPoolParams) (W
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.QueueNames,
+		&i.JobTimeoutSeconds,
+		&i.MaxAttempts,
+		&i.RetryBackoff,
+		&i.RetryBaseDelaySeconds,
+		&i.RetryMaxDelaySeconds,
 	)
 	return i, err
 }
 
 const listActiveWorkerPools = `-- name: ListActiveWorkerPools :many
-SELECT worker_pools.id, worker_pools.project_id, worker_pools.name, worker_pools.concurrency, worker_pools.status, worker_pools.created_at, worker_pools.updated_at FROM worker_pools
+SELECT worker_pools.id, worker_pools.project_id, worker_pools.name, worker_pools.concurrency, worker_pools.status, worker_pools.created_at, worker_pools.updated_at, worker_pools.queue_names, worker_pools.job_timeout_seconds, worker_pools.max_attempts, worker_pools.retry_backoff, worker_pools.retry_base_delay_seconds, worker_pools.retry_max_delay_seconds FROM worker_pools
 JOIN projects ON projects.id = worker_pools.project_id
 WHERE worker_pools.status = 'active'
   AND projects.archived_at IS NULL
@@ -112,6 +147,12 @@ func (q *Queries) ListActiveWorkerPools(ctx context.Context) ([]WorkerPool, erro
 			&i.Status,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.QueueNames,
+			&i.JobTimeoutSeconds,
+			&i.MaxAttempts,
+			&i.RetryBackoff,
+			&i.RetryBaseDelaySeconds,
+			&i.RetryMaxDelaySeconds,
 		); err != nil {
 			return nil, err
 		}
@@ -124,7 +165,7 @@ func (q *Queries) ListActiveWorkerPools(ctx context.Context) ([]WorkerPool, erro
 }
 
 const listWorkerPoolsByProject = `-- name: ListWorkerPoolsByProject :many
-SELECT id, project_id, name, concurrency, status, created_at, updated_at FROM worker_pools
+SELECT id, project_id, name, concurrency, status, created_at, updated_at, queue_names, job_timeout_seconds, max_attempts, retry_backoff, retry_base_delay_seconds, retry_max_delay_seconds FROM worker_pools
 WHERE project_id = $1
 ORDER BY created_at DESC
 `
@@ -146,6 +187,12 @@ func (q *Queries) ListWorkerPoolsByProject(ctx context.Context, projectID uuid.U
 			&i.Status,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.QueueNames,
+			&i.JobTimeoutSeconds,
+			&i.MaxAttempts,
+			&i.RetryBackoff,
+			&i.RetryBaseDelaySeconds,
+			&i.RetryMaxDelaySeconds,
 		); err != nil {
 			return nil, err
 		}
@@ -162,17 +209,29 @@ UPDATE worker_pools
 SET name = COALESCE($3, name),
     concurrency = COALESCE($4, concurrency),
     status = COALESCE($5, status),
+    queue_names = COALESCE($6::text[], queue_names),
+    job_timeout_seconds = COALESCE($7, job_timeout_seconds),
+    max_attempts = COALESCE($8, max_attempts),
+    retry_backoff = COALESCE($9, retry_backoff),
+    retry_base_delay_seconds = COALESCE($10, retry_base_delay_seconds),
+    retry_max_delay_seconds = COALESCE($11, retry_max_delay_seconds),
     updated_at = now()
 WHERE id = $1 AND project_id = $2
-RETURNING id, project_id, name, concurrency, status, created_at, updated_at
+RETURNING id, project_id, name, concurrency, status, created_at, updated_at, queue_names, job_timeout_seconds, max_attempts, retry_backoff, retry_base_delay_seconds, retry_max_delay_seconds
 `
 
 type UpdateWorkerPoolParams struct {
-	ID          uuid.UUID `json:"id"`
-	ProjectID   uuid.UUID `json:"project_id"`
-	Name        *string   `json:"name"`
-	Concurrency *int32    `json:"concurrency"`
-	Status      *string   `json:"status"`
+	ID                    uuid.UUID `json:"id"`
+	ProjectID             uuid.UUID `json:"project_id"`
+	Name                  *string   `json:"name"`
+	Concurrency           *int32    `json:"concurrency"`
+	Status                *string   `json:"status"`
+	QueueNames            []string  `json:"queue_names"`
+	JobTimeoutSeconds     *int32    `json:"job_timeout_seconds"`
+	MaxAttempts           *int32    `json:"max_attempts"`
+	RetryBackoff          *string   `json:"retry_backoff"`
+	RetryBaseDelaySeconds *int32    `json:"retry_base_delay_seconds"`
+	RetryMaxDelaySeconds  *int32    `json:"retry_max_delay_seconds"`
 }
 
 func (q *Queries) UpdateWorkerPool(ctx context.Context, arg UpdateWorkerPoolParams) (WorkerPool, error) {
@@ -182,6 +241,12 @@ func (q *Queries) UpdateWorkerPool(ctx context.Context, arg UpdateWorkerPoolPara
 		arg.Name,
 		arg.Concurrency,
 		arg.Status,
+		arg.QueueNames,
+		arg.JobTimeoutSeconds,
+		arg.MaxAttempts,
+		arg.RetryBackoff,
+		arg.RetryBaseDelaySeconds,
+		arg.RetryMaxDelaySeconds,
 	)
 	var i WorkerPool
 	err := row.Scan(
@@ -192,6 +257,12 @@ func (q *Queries) UpdateWorkerPool(ctx context.Context, arg UpdateWorkerPoolPara
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.QueueNames,
+		&i.JobTimeoutSeconds,
+		&i.MaxAttempts,
+		&i.RetryBackoff,
+		&i.RetryBaseDelaySeconds,
+		&i.RetryMaxDelaySeconds,
 	)
 	return i, err
 }

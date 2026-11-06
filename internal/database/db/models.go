@@ -103,13 +103,19 @@ type Worker struct {
 }
 
 type WorkerPool struct {
-	ID          uuid.UUID `json:"id"`
-	ProjectID   uuid.UUID `json:"project_id"`
-	Name        string    `json:"name"`
-	Concurrency int32     `json:"concurrency"`
-	Status      string    `json:"status"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID                    uuid.UUID `json:"id"`
+	ProjectID             uuid.UUID `json:"project_id"`
+	Name                  string    `json:"name"`
+	Concurrency           int32     `json:"concurrency"`
+	Status                string    `json:"status"`
+	CreatedAt             time.Time `json:"created_at"`
+	UpdatedAt             time.Time `json:"updated_at"`
+	QueueNames            []string  `json:"queue_names"`
+	JobTimeoutSeconds     int32     `json:"job_timeout_seconds"`
+	MaxAttempts           int32     `json:"max_attempts"`
+	RetryBackoff          string    `json:"retry_backoff"`
+	RetryBaseDelaySeconds int32     `json:"retry_base_delay_seconds"`
+	RetryMaxDelaySeconds  int32     `json:"retry_max_delay_seconds"`
 }
 
 type WorkerToken struct {

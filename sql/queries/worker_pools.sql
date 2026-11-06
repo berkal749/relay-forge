@@ -1,6 +1,17 @@
 -- name: CreateWorkerPool :one
-INSERT INTO worker_pools (project_id, name, concurrency, status)
-VALUES ($1, $2, $3, $4)
+INSERT INTO worker_pools (
+    project_id,
+    name,
+    concurrency,
+    status,
+    queue_names,
+    job_timeout_seconds,
+    max_attempts,
+    retry_backoff,
+    retry_base_delay_seconds,
+    retry_max_delay_seconds
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 RETURNING *;
 
 -- name: GetWorkerPool :one
@@ -24,6 +35,12 @@ UPDATE worker_pools
 SET name = COALESCE(sqlc.narg('name'), name),
     concurrency = COALESCE(sqlc.narg('concurrency'), concurrency),
     status = COALESCE(sqlc.narg('status'), status),
+    queue_names = COALESCE(sqlc.narg('queue_names')::text[], queue_names),
+    job_timeout_seconds = COALESCE(sqlc.narg('job_timeout_seconds'), job_timeout_seconds),
+    max_attempts = COALESCE(sqlc.narg('max_attempts'), max_attempts),
+    retry_backoff = COALESCE(sqlc.narg('retry_backoff'), retry_backoff),
+    retry_base_delay_seconds = COALESCE(sqlc.narg('retry_base_delay_seconds'), retry_base_delay_seconds),
+    retry_max_delay_seconds = COALESCE(sqlc.narg('retry_max_delay_seconds'), retry_max_delay_seconds),
     updated_at = now()
 WHERE id = $1 AND project_id = $2
 RETURNING *;

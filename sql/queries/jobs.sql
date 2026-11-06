@@ -2,10 +2,18 @@
 WITH candidate AS (
     SELECT jobs.id
     FROM jobs
-    WHERE jobs.project_id = $1
+    WHERE jobs.project_id = sqlc.arg('project_id')
       AND jobs.status IN ('pending', 'scheduled')
       AND jobs.scheduled_at <= now()
-      AND jobs.attempts < jobs.max_attempts
+      AND jobs.attempts < CASE
+          WHEN sqlc.arg('max_attempts_override')::int > 0
+          THEN sqlc.arg('max_attempts_override')::int
+          ELSE jobs.max_attempts
+      END
+      AND (
+          cardinality(sqlc.arg('queue_names')::text[]) = 0
+          OR jobs.queue_name = ANY(sqlc.arg('queue_names')::text[])
+      )
       AND EXISTS (
           SELECT 1
           FROM outbox_messages
@@ -17,7 +25,13 @@ WITH candidate AS (
     FOR UPDATE SKIP LOCKED
 )
 UPDATE jobs
-SET status = 'running', attempts = attempts + 1
+SET status = 'running',
+    attempts = attempts + 1,
+    max_attempts = CASE
+        WHEN sqlc.arg('max_attempts_override')::int > 0
+        THEN sqlc.arg('max_attempts_override')::int
+        ELSE jobs.max_attempts
+    END
 FROM candidate
 WHERE jobs.id = candidate.id
 RETURNING jobs.*;
