@@ -196,7 +196,7 @@ SELECT
           )
     ) AS failed_last_hour,
     (
-        SELECT avg(extract(epoch FROM (executions.finished_at - executions.started_at)))::float8
+        SELECT COALESCE(avg(extract(epoch FROM (executions.finished_at - executions.started_at))), 0)::float8
         FROM executions
         JOIN jobs ON jobs.id = executions.job_id
         WHERE jobs.project_id = worker_pools.project_id
