@@ -1,6 +1,37 @@
 # RelayForge
 
-Basic Go project template for the RelayForge API and worker.
+RelayForge is a self-hosted background job platform for teams that need reliable asynchronous work without operating a full workflow engine.
+
+## The idea
+
+Most applications eventually need to do work outside the request path: send an email, process an upload, call a third-party API, generate a report, or retry something that failed. A cron job or an in-process goroutine works until the process restarts, the task is duplicated, or a failure disappears silently.
+
+RelayForge makes that work durable and observable:
+
+- **Submit once, process reliably.** Jobs are written to PostgreSQL in the same transaction as an outbox message, so a submitted job is never lost between the API and a worker.
+- **Workers are disposable.** Workers claim jobs with `FOR UPDATE SKIP LOCKED`, execute registered handlers, and record every attempt. Crashed or disconnected workers are recovered through leases and retries.
+- **Remote workers need no database access.** Workers talk only to the API, so they can run on separate hosts, in other networks, or behind a TLS proxy.
+- **Everything is project-scoped.** Each project has its own API keys, worker pools, queues, concurrency, retry policy, rate limits, timeouts, and retention settings.
+- **Operators get a dashboard.** The React dashboard covers projects, jobs and executions, API keys, worker pools, worker health, token rotation, quotas, and admin invites.
+
+In short: submit a job over HTTP, let a pool of workers execute it, and trust the system to retry, time out, recover, and show you what happened.
+
+## How it works
+
+```
+Client ──HTTP──► API ──transaction──► PostgreSQL (jobs + outbox)
+                                         │
+                                    outbox dispatcher
+                                         │
+                                 worker claims a job
+                                         │
+                         handler runs ──► execution + result/retry
+```
+
+- **API** — authenticated job submission, project/admin APIs, remote worker protocol, outbox dispatch, cleanup, and lease reaping.
+- **Worker** — claims jobs, runs handlers under timeouts, heartbeats leases, and reports success or failure.
+- **Supervisor** — reconciles active worker pools into worker processes.
+- **Dashboard** — the operator and developer UI.
 
 ## Structure
 
@@ -14,17 +45,21 @@ relayforge/
 │   ├── config/
 │   ├── database/
 │   ├── auth/
+│   ├── invite/
 │   ├── project/
 │   ├── apikey/
 │   ├── job/
 │   ├── queue/
+│   ├── outbox/
 │   ├── worker/
 │   ├── workerpool/
 │   ├── supervisor/
 │   ├── workertoken/
 │   ├── secret/
 │   ├── execution/
+│   ├── metrics/
 │   ├── middleware/
+│   ├── integration/      # Database-backed tests
 │   └── http/
 │       ├── handlers/
 │       └── routes/
@@ -32,7 +67,8 @@ relayforge/
 ├── migrations/           # Database migrations
 ├── sql/queries/          # SQL queries
 ├── docs/                 # Project documentation
-├── deployments/docker/   # Docker deployment files
+├── deployments/docker/   # Docker and Caddy deployment files
+├── deployments/prometheus/ # Metrics scrape config and alerts
 ├── scripts/              # Development and ops scripts
 ├── go.mod
 ├── Makefile
